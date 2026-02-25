@@ -189,7 +189,8 @@ def test_module_aware_default_output(tmp_path: Path) -> None:
         target_name="wheel",
     )
     jobs = plan_jobs(tmp_path, config)
-    assert jobs[0].output_path == tmp_path / ".hatch_mojo" / "mogemma" / "_core.so"
+    suffix = _get_suffix_map()["python-extension"]
+    assert jobs[0].output_path == tmp_path / ".hatch_mojo" / "mogemma" / f"_core{suffix}"
 
 
 def test_plan_jobs_glob_no_matches_raises(tmp_path: Path) -> None:
