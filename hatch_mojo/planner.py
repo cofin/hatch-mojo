@@ -52,10 +52,10 @@ def _get_suffix_map() -> dict[str, str]:
 def _default_output(root: Path, job: JobConfig, input_path: Path) -> Path:
     suffix = _get_suffix_map()[job.emit]
     if job.emit == "python-extension" and job.module:
-        # mogemma._core -> .hatch_mojo/mogemma/_core.so
+        # mogemma._core -> build/mojo/mogemma/_core.so
         parts = job.module.split(".")
-        return root / ".hatch_mojo" / Path(*parts).with_suffix(suffix)
-    return root / ".hatch_mojo" / f"{input_path.stem}{suffix}"
+        return root / "build/mojo" / Path(*parts).with_suffix(suffix)
+    return root / "build/mojo" / f"{input_path.stem}{suffix}"
 
 
 def _expand_inputs(root: Path, pattern: str) -> list[Path]:

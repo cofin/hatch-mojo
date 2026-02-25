@@ -12,15 +12,15 @@ def test_manifest_roundtrip_and_cleanup(tmp_path: Path) -> None:
     out_a.write_bytes(b"a")
     out_b.write_bytes(b"b")
 
-    save_manifest(tmp_path, ".hatch_mojo", [out_a, out_b])
-    path = manifest_path(tmp_path, ".hatch_mojo")
+    save_manifest(tmp_path, "build/mojo", [out_a, out_b])
+    path = manifest_path(tmp_path, "build/mojo")
     assert path.exists()
 
-    clean_from_manifest(tmp_path, ".hatch_mojo")
+    clean_from_manifest(tmp_path, "build/mojo")
     assert not out_a.exists()
     assert not out_b.exists()
     assert not path.exists()
 
 
 def test_clean_from_manifest_missing_file_is_noop(tmp_path: Path) -> None:
-    clean_from_manifest(tmp_path, ".hatch_mojo")
+    clean_from_manifest(tmp_path, "build/mojo")

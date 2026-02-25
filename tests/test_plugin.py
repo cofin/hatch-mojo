@@ -38,7 +38,7 @@ def _config(*, parallel: bool = False, clean_before: bool = False, clean_after: 
         skip_editable=True,
         clean_before_build=clean_before,
         clean_after_build=clean_after,
-        build_dir=".hatch_mojo",
+        build_dir="build/mojo",
         parallel=parallel,
         fail_fast=True,
         mojo_bin=None,
@@ -144,7 +144,7 @@ def test_initialize_editable_copies_artifacts(monkeypatch: pytest.MonkeyPatch, t
     (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
 
     # Create a fake built artifact
-    build_dir = tmp_path / ".hatch_mojo" / "mogemma"
+    build_dir = tmp_path / "build/mojo" / "mogemma"
     build_dir.mkdir(parents=True)
     artifact = build_dir / "_core.so"
     artifact.write_text("fake-binary", encoding="utf-8")

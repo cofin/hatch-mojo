@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from hatch_mojo.types import BuildJob
@@ -51,8 +52,13 @@ def build_command(mojo_bin: str, root: Path, job: BuildJob) -> list[str]:
 
 def compile_job(*, mojo_bin: str, root: Path, job: BuildJob, fail_fast: bool = True) -> tuple[bool, str]:
     """Compile a single job and return status with output."""
+    if sys.platform == "win32" and not mojo_bin.lower().endswith(".exe"):
+        if Path(f"{mojo_bin}.exe").exists():
+            mojo_bin = f"{mojo_bin}.exe"
     job.output_path.parent.mkdir(parents=True, exist_ok=True)
     command = build_command(mojo_bin, root, job)
+    if sys.platform == "win32" and not command[0].lower().endswith(".exe"):
+        command = [sys.executable, *command]
     env = dict(os.environ)
     env.update(job.env)
     result = subprocess.run(command, cwd=str(root), env=env, capture_output=True, text=True, check=False)
