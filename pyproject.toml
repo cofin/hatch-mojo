@@ -1,6 +1,6 @@
 [project]
 name = "hatch-mojo"
-version = "0.1.1"
+version = "0.1.2"
 description = "Hatch build hook for compiling Mojo sources into Python and native artifacts"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -204,3 +204,44 @@ strict-imports = false
 [tool.codespell]
 ignore-words-list = "te,fo"
 skip = "uv.lock"
+
+[tool.bumpversion]
+allow_dirty = true
+commit = false
+commit_args = "--no-verify"
+current_version = "0.1.2"
+ignore_missing_files = false
+ignore_missing_version = false
+message = "chore(release): bump to `v{new_version}`"
+# Parse supports pre-release versions like 0.15.0-alpha.1, 0.15.0-beta.2, 0.15.0-rc.1
+parse = """(?x)
+ (?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)
+ (-(?P<pre>alpha|beta|rc)\\.(?P<pre_n>\\d+))?
+"""
+regex = false
+replace = "{new_version}"
+search = "{current_version}"
+# Serialize order: stable first (used when pre is "stable"), then pre-releases
+serialize = [
+ "{major}.{minor}.{patch}",
+ "{major}.{minor}.{patch}-{pre}.{pre_n}",
+]
+sign_tags = false
+tag = false
+tag_message = "chore(release): v{new_version}"
+tag_name = "v{new_version}"
+
+# Pre-release stage configuration
+# "stable" is used internally to represent no pre-release suffix
+[tool.bumpversion.parts.pre]
+optional_value = "stable"
+first_value = "stable"
+values = ["alpha", "beta", "rc", "stable"]
+
+[tool.bumpversion.parts.pre_n]
+first_value = "1"
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'
