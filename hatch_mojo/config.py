@@ -167,7 +167,7 @@ def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
             clean_before_build=_bool(raw.get("clean-before-build"), False),
             clean_after_build=_bool(raw.get("clean-after-build"), False),
             skip_editable=_bool(raw.get("skip-editable"), True),
-            build_dir=str(raw.get("build-dir") or ".hatch_mojo"),
+            build_dir=str(raw.get("build-dir") or "build/mojo"),
             include=include,
             exclude=exclude,
             targets=tuple(_as_list(raw.get("targets") or ["wheel"])),
@@ -177,7 +177,7 @@ def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
     if not jobs:
         raise ValueError("No build jobs resolved from 'jobs'/'sources' configuration")
 
-    build_dir = Path(str(raw.get("build-dir") or ".hatch_mojo"))
+    build_dir = Path(str(raw.get("build-dir") or "build/mojo"))
     return HookConfig(
         mojo_bin=str(raw.get("mojo-bin")) if raw.get("mojo-bin") else None,
         parallel=_bool(raw.get("parallel"), False),
