@@ -102,7 +102,7 @@ def test_initialize_parallel_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app)
     jobs = [_job(tmp_path, name="a"), _job(tmp_path, name="b")]
     monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_args, **_kwargs: _config(parallel=True))
-    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_args, **_kwargs: jobs)
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs_leveled", lambda *_args, **_kwargs: [jobs])
     monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_args, **_kwargs: "mojo")
     monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: None)
     monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_args, **_kwargs: None)
@@ -135,6 +135,52 @@ def test_initialize_parallel_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     MojoBuildHook.initialize(cast("Any", fake), "standard", {})
     assert "bad" in warnings
     assert "good" in debugs
+
+
+def test_initialize_editable_copies_artifacts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Set up source tree with __init__.py
+    pkg_dir = tmp_path / "src" / "py" / "mogemma"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+
+    # Create a fake built artifact
+    build_dir = tmp_path / ".hatch_mojo" / "mogemma"
+    build_dir.mkdir(parents=True)
+    artifact = build_dir / "_core.so"
+    artifact.write_text("fake-binary", encoding="utf-8")
+
+    job = BuildJob(
+        name="core",
+        input_path=tmp_path / "src" / "mo" / "core.mojo",
+        output_path=artifact,
+        emit="python-extension",
+        module="mogemma._core",
+        install_kind=None,
+        install_path=None,
+        include_dirs=(),
+        defines=(),
+        flags=(),
+        env={},
+        depends_on=(),
+    )
+
+    cfg = _config()
+    cfg.skip_editable = False
+    warnings: list[str] = []
+    debugs: list[str] = []
+    app = SimpleNamespace(display_warning=warnings.append, display_debug=debugs.append)
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app)
+    monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_args, **_kwargs: cfg)
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_args, **_kwargs: [job])
+    monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_args, **_kwargs: "mojo")
+    monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kwargs: (True, "ok"))
+    monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: None)
+    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_args, **_kwargs: None)
+
+    MojoBuildHook.initialize(cast("Any", fake), "editable", {})
+    copied = pkg_dir / "_core.so"
+    assert copied.exists()
+    assert copied.read_text(encoding="utf-8") == "fake-binary"
 
 
 def test_clean_calls_clean_from_manifest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

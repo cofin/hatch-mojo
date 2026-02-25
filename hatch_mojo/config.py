@@ -38,13 +38,11 @@ class HookConfig:
     """Validated plugin config."""
 
     mojo_bin: str | None
-    strict: bool
     parallel: bool
     fail_fast: bool
     clean_before_build: bool
     clean_after_build: bool
     skip_editable: bool
-    log_level: str
     build_dir: str
     include: tuple[str, ...]
     exclude: tuple[str, ...]
@@ -164,13 +162,11 @@ def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
     if target_name not in set(_as_list(raw.get("targets")) or ["wheel"]):
         return HookConfig(
             mojo_bin=None,
-            strict=_bool(raw.get("strict"), True),
             parallel=_bool(raw.get("parallel"), False),
             fail_fast=_bool(raw.get("fail-fast"), True),
             clean_before_build=_bool(raw.get("clean-before-build"), False),
             clean_after_build=_bool(raw.get("clean-after-build"), False),
             skip_editable=_bool(raw.get("skip-editable"), True),
-            log_level=str(raw.get("log-level") or "info"),
             build_dir=str(raw.get("build-dir") or ".hatch_mojo"),
             include=include,
             exclude=exclude,
@@ -184,13 +180,11 @@ def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
     build_dir = Path(str(raw.get("build-dir") or ".hatch_mojo"))
     return HookConfig(
         mojo_bin=str(raw.get("mojo-bin")) if raw.get("mojo-bin") else None,
-        strict=_bool(raw.get("strict"), True),
         parallel=_bool(raw.get("parallel"), False),
         fail_fast=_bool(raw.get("fail-fast"), True),
         clean_before_build=_bool(raw.get("clean-before-build"), False),
         clean_after_build=_bool(raw.get("clean-after-build"), False),
         skip_editable=_bool(raw.get("skip-editable"), True),
-        log_level=str(raw.get("log-level") or "info"),
         build_dir=str(build_dir),
         include=include,
         exclude=exclude,
