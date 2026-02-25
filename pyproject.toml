@@ -1,14 +1,13 @@
 [project]
 name = "hatch-mojo"
-version = "0.1.0"
+version = "0.1.1"
 description = "Hatch build hook for compiling Mojo sources into Python and native artifacts"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Cody Fincher", email = "cody@litestar.dev" }]
 license = { text = "MIT" }
 keywords = ["hatch", "hatchling", "mojo", "build", "plugin"]
-classifiers = [
-  "Development Status :: 3 - Alpha",
+classifiers = [ 
   "Framework :: Hatch",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
