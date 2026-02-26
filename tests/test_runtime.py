@@ -9,10 +9,10 @@ import pytest
 
 from hatch_mojo.runtime import (
     _RUNTIME_LIB_BASES,
-    _SENTINEL,
     _compute_extension_rpath,
     _lib_filename,
     _patch_rpath,
+    _sentinel,
     bundle_runtime_libs,
     discover_modular_lib,
 )
@@ -25,7 +25,7 @@ def _make_modular_lib(base: Path) -> Path:
     """Create a fake modular/lib directory with the sentinel and all runtime libs."""
     lib_dir = base / "lib"
     lib_dir.mkdir(parents=True, exist_ok=True)
-    (lib_dir / _SENTINEL).write_bytes(b"")
+    (lib_dir / _sentinel()).write_bytes(b"")
     for name in _RUNTIME_LIB_BASES:
         (lib_dir / _lib_filename(name)).write_bytes(b"fake-lib")
     return lib_dir
@@ -268,7 +268,7 @@ def test_bundle_raises_on_missing_runtime_lib(tmp_path: Path, monkeypatch: pytes
     lib_dir = tmp_path / "modular" / "lib"
     lib_dir.mkdir(parents=True)
     # Create sentinel + only the first lib, but omit the rest
-    (lib_dir / _SENTINEL).write_bytes(b"")
+    (lib_dir / _sentinel()).write_bytes(b"")
     (lib_dir / _lib_filename(_RUNTIME_LIB_BASES[0])).write_bytes(b"fake")
     monkeypatch.setenv("MODULAR_LIB_DIR", str(lib_dir))
 
