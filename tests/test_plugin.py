@@ -32,7 +32,13 @@ def _job(tmp_path: Path, *, name: str = "core") -> BuildJob:
     )
 
 
-def _config(*, parallel: bool = False, clean_before: bool = False, clean_after: bool = False) -> Any:
+def _config(
+    *,
+    parallel: bool = False,
+    clean_before: bool = False,
+    clean_after: bool = False,
+    bundle_libs: bool = True,
+) -> Any:
     return SimpleNamespace(
         jobs=(object(),),
         skip_editable=True,
@@ -42,6 +48,7 @@ def _config(*, parallel: bool = False, clean_before: bool = False, clean_after: 
         parallel=parallel,
         fail_fast=True,
         mojo_bin=None,
+        bundle_libs=bundle_libs,
     )
 
 
@@ -83,6 +90,7 @@ def test_initialize_serial_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     seq: list[str] = []
     monkeypatch.setattr("hatch_mojo.plugin.clean_from_manifest", lambda *_args, **_kwargs: seq.append("clean"))
     monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kwargs: (True, "ok"))
+    monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", lambda **_kwargs: {})
     monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: seq.append("register"))
     monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_args, **_kwargs: seq.append("save"))
 
@@ -104,6 +112,7 @@ def test_initialize_parallel_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_args, **_kwargs: _config(parallel=True))
     monkeypatch.setattr("hatch_mojo.plugin.plan_jobs_leveled", lambda *_args, **_kwargs: [jobs])
     monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_args, **_kwargs: "mojo")
+    monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", lambda **_kwargs: {})
     monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: None)
     monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_args, **_kwargs: None)
 
@@ -174,6 +183,7 @@ def test_initialize_editable_copies_artifacts(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_args, **_kwargs: [job])
     monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_args, **_kwargs: "mojo")
     monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kwargs: (True, "ok"))
+    monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", lambda **_kwargs: {})
     monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: None)
     monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_args, **_kwargs: None)
 
@@ -181,6 +191,58 @@ def test_initialize_editable_copies_artifacts(monkeypatch: pytest.MonkeyPatch, t
     copied = pkg_dir / "_core.so"
     assert copied.exists()
     assert copied.read_text(encoding="utf-8") == "fake-binary"
+
+
+def test_initialize_calls_bundle_when_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    warnings: list[str] = []
+    debugs: list[str] = []
+    app = SimpleNamespace(display_warning=warnings.append, display_debug=debugs.append)
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app)
+    job = _job(tmp_path)
+    monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_args, **_kwargs: _config(bundle_libs=True))
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_args, **_kwargs: [job])
+    monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_args, **_kwargs: "mojo")
+    monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kwargs: (True, "ok"))
+    monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: None)
+    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_args, **_kwargs: None)
+
+    bundle_called = {"yes": False}
+
+    def _fake_bundle(**_kwargs: Any) -> dict[str, str]:
+        bundle_called["yes"] = True
+        return {"/tmp/staged.so": "pkg.libs/libFoo.so"}
+
+    monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", _fake_bundle)
+
+    build_data: dict[str, Any] = {}
+    MojoBuildHook.initialize(cast("Any", fake), "standard", build_data)
+    assert bundle_called["yes"] is True
+    assert build_data["force_include"]["/tmp/staged.so"] == "pkg.libs/libFoo.so"
+
+
+def test_initialize_skips_bundle_when_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    warnings: list[str] = []
+    debugs: list[str] = []
+    app = SimpleNamespace(display_warning=warnings.append, display_debug=debugs.append)
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app)
+    job = _job(tmp_path)
+    monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_args, **_kwargs: _config(bundle_libs=False))
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_args, **_kwargs: [job])
+    monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_args, **_kwargs: "mojo")
+    monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kwargs: (True, "ok"))
+    monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: None)
+    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_args, **_kwargs: None)
+
+    bundle_called = {"yes": False}
+
+    def _fake_bundle(**_kwargs: Any) -> dict[str, str]:
+        bundle_called["yes"] = True
+        return {}
+
+    monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", _fake_bundle)
+
+    MojoBuildHook.initialize(cast("Any", fake), "standard", {})
+    assert bundle_called["yes"] is False
 
 
 def test_clean_calls_clean_from_manifest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

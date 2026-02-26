@@ -164,6 +164,41 @@ def test_parse_config_rejects_install_without_path() -> None:
         )
 
 
+def test_parse_config_bundle_libs_defaults_true() -> None:
+    config = parse_config(
+        {
+            "jobs": [
+                {
+                    "name": "core",
+                    "input": "src/mo/pkg/core.mojo",
+                    "emit": "python-extension",
+                    "module": "pkg._core",
+                }
+            ]
+        },
+        target_name="wheel",
+    )
+    assert config.bundle_libs is True
+
+
+def test_parse_config_bundle_libs_explicit_false() -> None:
+    config = parse_config(
+        {
+            "bundle-libs": False,
+            "jobs": [
+                {
+                    "name": "core",
+                    "input": "src/mo/pkg/core.mojo",
+                    "emit": "python-extension",
+                    "module": "pkg._core",
+                }
+            ],
+        },
+        target_name="wheel",
+    )
+    assert config.bundle_libs is False
+
+
 def test_parse_config_rejects_invalid_marker() -> None:
     with pytest.raises(InvalidMarker):
         parse_config(

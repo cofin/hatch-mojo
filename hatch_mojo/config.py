@@ -43,6 +43,7 @@ class HookConfig:
     clean_before_build: bool
     clean_after_build: bool
     skip_editable: bool
+    bundle_libs: bool
     build_dir: str
     include: tuple[str, ...]
     exclude: tuple[str, ...]
@@ -167,6 +168,7 @@ def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
             clean_before_build=_bool(raw.get("clean-before-build"), False),
             clean_after_build=_bool(raw.get("clean-after-build"), False),
             skip_editable=_bool(raw.get("skip-editable"), True),
+            bundle_libs=_bool(raw.get("bundle-libs"), True),
             build_dir=str(raw.get("build-dir") or "build/mojo"),
             include=include,
             exclude=exclude,
@@ -185,6 +187,7 @@ def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
         clean_before_build=_bool(raw.get("clean-before-build"), False),
         clean_after_build=_bool(raw.get("clean-after-build"), False),
         skip_editable=_bool(raw.get("skip-editable"), True),
+        bundle_libs=_bool(raw.get("bundle-libs"), True),
         build_dir=str(build_dir),
         include=include,
         exclude=exclude,

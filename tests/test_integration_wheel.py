@@ -43,6 +43,7 @@ def test_wheel_build_includes_native_extension(tmp_path: Path) -> None:
         [tool.hatch.build.targets.wheel.hooks.mojo]
         targets = ["wheel"]
         mojo-bin = "{fake_mojo.as_posix()}"
+        bundle-libs = false
 
         [[tool.hatch.build.targets.wheel.hooks.mojo.jobs]]
         name = "core"
