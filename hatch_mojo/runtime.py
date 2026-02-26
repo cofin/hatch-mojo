@@ -19,14 +19,17 @@ _RUNTIME_LIB_BASES: tuple[str, ...] = (
     "AsyncRTMojoBindings",
 )
 
-_SENTINEL = "libKGENCompilerRTShared.so"
-
 
 def _lib_filename(base: str) -> str:
     """Return platform-appropriate shared library filename."""
     if sys.platform == "darwin":
         return f"lib{base}.dylib"
     return f"lib{base}.so"
+
+
+def _sentinel() -> str:
+    """Return the platform-appropriate sentinel filename for library discovery."""
+    return _lib_filename(_RUNTIME_LIB_BASES[0])
 
 
 def discover_modular_lib(root: Path, mojo_bin: str | None) -> Path:
@@ -41,20 +44,20 @@ def discover_modular_lib(root: Path, mojo_bin: str | None) -> Path:
     env_dir = os.environ.get("MODULAR_LIB_DIR")
     if env_dir:
         path = Path(env_dir)
-        if (path / _SENTINEL).exists():
+        if (path / _sentinel()).exists():
             return path
 
     spec = importlib.util.find_spec("modular")
     if spec and spec.origin:
         candidate = Path(spec.origin).parent / "lib"
-        if (candidate / _SENTINEL).exists():
+        if (candidate / _sentinel()).exists():
             return candidate
 
     if mojo_bin:
         cursor = Path(mojo_bin).resolve().parent
         for _ in range(5):
             candidate = cursor / "lib"
-            if (candidate / _SENTINEL).exists():
+            if (candidate / _sentinel()).exists():
                 return candidate
             if cursor.parent == cursor:
                 break
@@ -64,7 +67,7 @@ def discover_modular_lib(root: Path, mojo_bin: str | None) -> Path:
         Path("/opt/modular/lib"),
         root / ".modular" / "lib",
     ):
-        if (container_path / _SENTINEL).exists():
+        if (container_path / _sentinel()).exists():
             return container_path
 
     msg = (

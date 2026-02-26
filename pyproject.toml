@@ -1,6 +1,6 @@
 [project]
 name = "hatch-mojo"
-version = "0.1.3"
+version = "0.1.4"
 description = "Hatch build hook for compiling Mojo sources into Python and native artifacts"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -209,7 +209,7 @@ skip = "uv.lock"
 allow_dirty = true
 commit = false
 commit_args = "--no-verify"
-current_version = "0.1.3"
+current_version = "0.1.4"
 ignore_missing_files = false
 ignore_missing_version = false
 message = "chore(release): bump to `v{new_version}`"
