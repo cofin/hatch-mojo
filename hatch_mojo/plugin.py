@@ -14,6 +14,7 @@ from hatch_mojo.cleaning import clean_from_manifest, save_manifest
 from hatch_mojo.compiler import compile_job, discover_mojo
 from hatch_mojo.config import parse_config
 from hatch_mojo.planner import plan_jobs, plan_jobs_leveled
+from hatch_mojo.runtime import bundle_runtime_libs
 from hatch_mojo.types import BuildJob
 
 _SOURCE_LAYOUTS = ("", "src", "src/py")
@@ -102,6 +103,15 @@ class MojoBuildHook(BuildHookInterface[Any]):
                     self.app.display_warning(log)
                 else:
                     self.app.display_debug(log)
+
+        if config.bundle_libs:
+            bundled = bundle_runtime_libs(
+                root=root,
+                build_dir=config.build_dir,
+                jobs=planned,
+                mojo_bin=mojo_bin,
+            )
+            build_data.setdefault("force_include", {}).update(bundled)
 
         register_artifacts(root=root, build_data=build_data, jobs=planned, target_name=self.target_name)
         save_manifest(root, config.build_dir, [job.output_path for job in planned])
