@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -48,10 +50,16 @@ def discover_modular_lib(root: Path, mojo_bin: str | None) -> Path:
             return path
 
     spec = importlib.util.find_spec("modular")
-    if spec and spec.origin:
-        candidate = Path(spec.origin).parent / "lib"
-        if (candidate / _sentinel()).exists():
-            return candidate
+    if spec:
+        if spec.origin:
+            candidate = Path(spec.origin).parent / "lib"
+            if (candidate / _sentinel()).exists():
+                return candidate
+        if spec.submodule_search_locations:
+            for loc in spec.submodule_search_locations:
+                candidate = Path(loc) / "lib"
+                if (candidate / _sentinel()).exists():
+                    return candidate
 
     if mojo_bin:
         cursor = Path(mojo_bin).resolve().parent
@@ -75,6 +83,153 @@ def discover_modular_lib(root: Path, mojo_bin: str | None) -> Path:
         "Set MODULAR_LIB_DIR or ensure the modular package is importable."
     )
     raise FileNotFoundError(msg)
+
+
+_OTOOL_LIB_RE: re.Pattern[str] = re.compile(r"^\s+(.+?)\s+\(compatibility version")
+_OTOOL_RPATH_RE: re.Pattern[str] = re.compile(r"^\s+path\s+(.+?)(?:\s+\(offset .+\))?$")
+
+
+def _get_linked_libraries(target: Path) -> list[str]:
+    """Return library paths that *target* links against (macOS ``otool -L``)."""
+    result = subprocess.run(
+        ["otool", "-L", str(target)],  # noqa: S607
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    libs: list[str] = []
+    for line in result.stdout.splitlines()[1:]:  # skip first line (binary name)
+        m = _OTOOL_LIB_RE.match(line)
+        if m:
+            libs.append(m.group(1))
+    return libs
+
+
+def _strip_absolute_rpaths(target: Path) -> None:
+    """Remove absolute RPATHs from a Mach-O binary.
+
+    Bundled dylibs may carry residual RPATHs from the SDK build environment
+    (e.g. ``/opt/modular/lib``).  Stripping them prevents the dynamic linker
+    from accidentally loading a different version from the SDK on developer
+    machines.
+    """
+    result = subprocess.run(
+        ["otool", "-l", str(target)],  # noqa: S607
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for line in result.stdout.splitlines():
+        m = _OTOOL_RPATH_RE.match(line)
+        if m:
+            rpath = m.group(1)
+            if not rpath.startswith("@"):
+                subprocess.run(
+                    ["install_name_tool", "-delete_rpath", rpath, str(target)],  # noqa: S607
+                    check=True,
+                    capture_output=True,
+                )
+
+
+def _has_rpath(target: Path, rpath: str) -> bool:
+    """Check whether *target* already contains the given LC_RPATH entry."""
+    result = subprocess.run(
+        ["otool", "-l", str(target)],  # noqa: S607
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for line in result.stdout.splitlines():
+        m = _OTOOL_RPATH_RE.match(line)
+        if m and m.group(1) == rpath:
+            return True
+    return False
+
+
+def _resign_ad_hoc(target: Path) -> None:
+    """Ad-hoc re-sign a binary after modifying it with ``install_name_tool``.
+
+    On macOS (especially arm64), modifying a signed binary invalidates its
+    code signature.  The OS loader will refuse to load it at runtime
+    (``EXC_BAD_ACCESS`` / ``killed: 9``).  An ad-hoc signature restores a
+    valid (but identity-less) signature that satisfies the loader.
+    """
+    subprocess.run(
+        ["codesign", "-s", "-", "-f", str(target)],  # noqa: S607
+        check=True,
+        capture_output=True,
+    )
+
+
+def _patch_macos_dylibs(libs_dir: Path, lib_filenames: list[str]) -> None:
+    """Rewrite install names for all bundled dylibs in *libs_dir*.
+
+    For each dylib:
+    - Change its own identity (LC_ID_DYLIB) to ``@rpath/<filename>``
+    - Rewrite references to sibling dylibs from absolute paths to ``@rpath/<basename>``
+    - Ad-hoc re-sign to keep the code signature valid
+    """
+    for filename in lib_filenames:
+        target = libs_dir / filename
+        # Strip residual absolute RPATHs from SDK build environment
+        _strip_absolute_rpaths(target)
+        # Change own identity
+        subprocess.run(
+            ["install_name_tool", "-id", f"@rpath/{filename}", str(target)],  # noqa: S607
+            check=True,
+            capture_output=True,
+        )
+        # Rewrite sibling references
+        linked = _get_linked_libraries(target)
+        for ref in linked:
+            if ref.startswith(("@rpath/", "@loader_path/")):
+                continue
+            if ref.startswith(("/usr/lib/", "/System/")):
+                continue
+            basename = Path(ref).name
+            if basename in lib_filenames:
+                subprocess.run(
+                    [  # noqa: S607
+                        "install_name_tool",
+                        "-change",
+                        ref,
+                        f"@rpath/{basename}",
+                        str(target),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+        _resign_ad_hoc(target)
+
+
+def _patch_macos_extension(ext: Path, lib_filenames: list[str], rpath: str) -> None:
+    """Rewrite an extension's references to bundled dylibs and add RPATH."""
+    linked = _get_linked_libraries(ext)
+    for ref in linked:
+        if ref.startswith(("@rpath/", "@loader_path/")):
+            continue
+        if ref.startswith(("/usr/lib/", "/System/")):
+            continue
+        basename = Path(ref).name
+        if basename in lib_filenames:
+            subprocess.run(
+                [  # noqa: S607
+                    "install_name_tool",
+                    "-change",
+                    ref,
+                    f"@rpath/{basename}",
+                    str(ext),
+                ],
+                check=True,
+                capture_output=True,
+            )
+    if not _has_rpath(ext, rpath):
+        subprocess.run(
+            ["install_name_tool", "-add_rpath", rpath, str(ext)],  # noqa: S607
+            check=True,
+            capture_output=True,
+        )
+    _resign_ad_hoc(ext)
 
 
 def _compute_extension_rpath(module: str, pkg_name: str) -> str:
@@ -141,6 +296,8 @@ def bundle_runtime_libs(
         libs_dir = abs_build / f"{pkg_name}.libs"
         libs_dir.mkdir(parents=True, exist_ok=True)
 
+        # Copy all runtime libs
+        lib_filenames: list[str] = []
         for base in _RUNTIME_LIB_BASES:
             filename = _lib_filename(base)
             src = modular_lib / filename
@@ -149,14 +306,22 @@ def bundle_runtime_libs(
                 raise FileNotFoundError(msg)
             dest = libs_dir / filename
             shutil.copy2(src, dest)
-
-            origin = "@loader_path" if sys.platform == "darwin" else "$ORIGIN"
-            _patch_rpath(dest, origin)
-
+            dest.chmod(dest.stat().st_mode | stat.S_IWUSR)
+            lib_filenames.append(filename)
             force_include[str(dest)] = f"{pkg_name}.libs/{filename}"
 
-        for job in pkg_jobs:
-            rpath = _compute_extension_rpath(job.module, pkg_name)  # type: ignore[arg-type]
-            _patch_rpath(job.output_path, rpath)
+        if sys.platform == "darwin":
+            # Rewrite dylib install names and inter-library references
+            _patch_macos_dylibs(libs_dir, lib_filenames)
+            for job in pkg_jobs:
+                rpath = _compute_extension_rpath(job.module, pkg_name)  # type: ignore[arg-type]
+                _patch_macos_extension(job.output_path, lib_filenames, rpath)
+        else:
+            # Linux: set RPATH on each copied lib and extension
+            for filename in lib_filenames:
+                _patch_rpath(libs_dir / filename, "$ORIGIN")
+            for job in pkg_jobs:
+                rpath = _compute_extension_rpath(job.module, pkg_name)  # type: ignore[arg-type]
+                _patch_rpath(job.output_path, rpath)
 
     return force_include
