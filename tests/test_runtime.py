@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import stat
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -10,9 +12,16 @@ import pytest
 from hatch_mojo.runtime import (
     _RUNTIME_LIB_BASES,
     _compute_extension_rpath,
+    _get_linked_libraries,
+    _has_rpath,
     _lib_filename,
+    _patch_macos_dylibs,
+    _patch_macos_extension,
     _patch_rpath,
+    _resign_ad_hoc,
     _sentinel,
+    _strip_absolute_rpaths,
+    _write_license_notice,
     bundle_runtime_libs,
     discover_modular_lib,
 )
@@ -234,7 +243,7 @@ def test_bundle_full_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     ):
         result = bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
 
-    assert len(result) == len(_RUNTIME_LIB_BASES)
+    assert len(result) == len(_RUNTIME_LIB_BASES) + 1  # +1 for NOTICE
     libs_dir = tmp_path / "build" / "mojo" / "mogemma.libs"
     assert libs_dir.is_dir()
 
@@ -258,7 +267,7 @@ def test_bundle_multiple_packages(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     ):
         result = bundle_runtime_libs(tmp_path, "build/mojo", [job_a, job_b], None)
 
-    assert len(result) == len(_RUNTIME_LIB_BASES) * 2
+    assert len(result) == (len(_RUNTIME_LIB_BASES) + 1) * 2  # +1 NOTICE per pkg
     assert any("pkga.libs/" in v for v in result.values())
     assert any("pkgb.libs/" in v for v in result.values())
 
@@ -280,3 +289,483 @@ def test_bundle_raises_on_missing_runtime_lib(tmp_path: Path, monkeypatch: pytes
         pytest.raises(FileNotFoundError, match="Missing required Mojo runtime"),
     ):
         bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
+
+
+# ── discover_modular_lib: namespace packages ────────────────────────────────
+
+
+def test_discover_from_namespace_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Namespace package: spec.origin is None, submodule_search_locations has the path."""
+    modular_dir = tmp_path / "modular"
+    lib_dir = _make_modular_lib(modular_dir)
+    monkeypatch.delenv("MODULAR_LIB_DIR", raising=False)
+
+    fake_spec = SimpleNamespace(
+        origin=None,
+        submodule_search_locations=[str(modular_dir)],
+    )
+    monkeypatch.setattr("hatch_mojo.runtime.importlib.util.find_spec", lambda _name: fake_spec)
+    assert discover_modular_lib(tmp_path, None) == lib_dir
+
+
+def test_discover_namespace_package_skips_bad_locations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Falls through when namespace locations lack the sentinel file."""
+    bad_dir = tmp_path / "wrong"
+    bad_dir.mkdir()
+    monkeypatch.delenv("MODULAR_LIB_DIR", raising=False)
+
+    fake_spec = SimpleNamespace(
+        origin=None,
+        submodule_search_locations=[str(bad_dir)],
+    )
+    monkeypatch.setattr("hatch_mojo.runtime.importlib.util.find_spec", lambda _name: fake_spec)
+    with pytest.raises(FileNotFoundError):
+        discover_modular_lib(tmp_path, None)
+
+
+# ── _get_linked_libraries ──────────────────────────────────────────────────
+
+
+def test_get_linked_libraries_parses_otool_output(tmp_path: Path) -> None:
+    otool_output = (
+        "/path/to/_core.so:\n"
+        "\t/opt/modular/lib/libKGENCompilerRTShared.dylib (compatibility version 0.0.0)\n"
+        "\t/opt/modular/lib/libAsyncRTRuntimeGlobals.dylib (compatibility version 0.0.0)\n"
+        "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
+    )
+    mock_result = SimpleNamespace(stdout=otool_output)
+    target = tmp_path / "test.dylib"
+    target.write_bytes(b"")
+    with patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result):
+        libs = _get_linked_libraries(target)
+    assert libs == [
+        "/opt/modular/lib/libKGENCompilerRTShared.dylib",
+        "/opt/modular/lib/libAsyncRTRuntimeGlobals.dylib",
+        "/usr/lib/libSystem.B.dylib",
+    ]
+
+
+def test_get_linked_libraries_handles_empty_deps(tmp_path: Path) -> None:
+    otool_output = "/path/to/binary:\n"
+    mock_result = SimpleNamespace(stdout=otool_output)
+    target = tmp_path / "test.dylib"
+    target.write_bytes(b"")
+    with patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result):
+        libs = _get_linked_libraries(target)
+    assert libs == []
+
+
+# ── _strip_absolute_rpaths ──────────────────────────────────────────────────
+
+
+_OTOOL_LOAD_COMMANDS = (
+    "Load command 0\n"
+    "      cmd LC_RPATH\n"
+    "  cmdsize 40\n"
+    "    path /opt/modular/lib (offset 12)\n"
+    "Load command 1\n"
+    "      cmd LC_RPATH\n"
+    "  cmdsize 48\n"
+    "    path @loader_path/../lib (offset 12)\n"
+    "Load command 2\n"
+    "      cmd LC_RPATH\n"
+    "  cmdsize 40\n"
+    "    path /usr/local/lib (offset 12)\n"
+    "Load command 3\n"
+    "      cmd LC_RPATH\n"
+    "  cmdsize 48\n"
+    "    path @rpath/more (offset 12)\n"
+)
+
+
+def test_strip_absolute_rpaths(tmp_path: Path) -> None:
+    """Only absolute RPATHs are deleted; @-prefixed ones are kept."""
+    target = tmp_path / "lib.dylib"
+    target.write_bytes(b"")
+    mock_result = SimpleNamespace(stdout=_OTOOL_LOAD_COMMANDS)
+
+    with patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result) as mock_run:
+        _strip_absolute_rpaths(target)
+
+    calls = mock_run.call_args_list
+    # First call: otool -l
+    assert calls[0].args[0] == ["otool", "-l", str(target)]
+    # Two delete_rpath calls for the absolute paths
+    assert calls[1].args[0] == [
+        "install_name_tool",
+        "-delete_rpath",
+        "/opt/modular/lib",
+        str(target),
+    ]
+    assert calls[2].args[0] == [
+        "install_name_tool",
+        "-delete_rpath",
+        "/usr/local/lib",
+        str(target),
+    ]
+    # No more calls — @loader_path and @rpath entries are preserved
+    assert len(calls) == 3
+
+
+def test_strip_absolute_rpaths_preserves_at_paths(tmp_path: Path) -> None:
+    """When all RPATHs start with @, no delete_rpath calls are made."""
+    otool_output = (
+        "Load command 0\n"
+        "      cmd LC_RPATH\n"
+        "  cmdsize 48\n"
+        "    path @loader_path/../lib (offset 12)\n"
+        "Load command 1\n"
+        "      cmd LC_RPATH\n"
+        "  cmdsize 40\n"
+        "    path @rpath/more (offset 12)\n"
+    )
+    target = tmp_path / "lib.dylib"
+    target.write_bytes(b"")
+    mock_result = SimpleNamespace(stdout=otool_output)
+
+    with patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result) as mock_run:
+        _strip_absolute_rpaths(target)
+
+    # Only the otool -l call, no delete_rpath calls
+    assert len(mock_run.call_args_list) == 1
+
+
+# ── _has_rpath ──────────────────────────────────────────────────────────────
+
+
+def test_has_rpath_true(tmp_path: Path) -> None:
+    target = tmp_path / "ext.so"
+    target.write_bytes(b"")
+    mock_result = SimpleNamespace(stdout=_OTOOL_LOAD_COMMANDS)
+
+    with patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result):
+        assert _has_rpath(target, "/opt/modular/lib") is True
+
+
+def test_has_rpath_false(tmp_path: Path) -> None:
+    target = tmp_path / "ext.so"
+    target.write_bytes(b"")
+    mock_result = SimpleNamespace(stdout=_OTOOL_LOAD_COMMANDS)
+
+    with patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result):
+        assert _has_rpath(target, "/nonexistent/path") is False
+
+
+# ── _patch_macos_dylibs ────────────────────────────────────────────────────
+
+
+def test_patch_macos_dylibs_changes_id(tmp_path: Path) -> None:
+    """Verifies -id @rpath/<filename> is called, then ad-hoc re-signed."""
+    libs_dir = tmp_path / "libs"
+    libs_dir.mkdir()
+    (libs_dir / "libFoo.dylib").write_bytes(b"")
+
+    # _get_linked_libraries returns no deps so only -id + codesign are called
+    with (
+        patch("hatch_mojo.runtime.subprocess.run") as mock_run,
+        patch("hatch_mojo.runtime._get_linked_libraries", return_value=[]),
+        patch("hatch_mojo.runtime._strip_absolute_rpaths"),
+    ):
+        _patch_macos_dylibs(libs_dir, ["libFoo.dylib"])
+
+    calls = mock_run.call_args_list
+    assert len(calls) == 2
+    assert calls[0].args[0] == [
+        "install_name_tool",
+        "-id",
+        "@rpath/libFoo.dylib",
+        str(libs_dir / "libFoo.dylib"),
+    ]
+    assert calls[1].args[0] == [
+        "codesign",
+        "-s",
+        "-",
+        "-f",
+        str(libs_dir / "libFoo.dylib"),
+    ]
+
+
+def test_patch_macos_dylibs_fixes_sibling_references(tmp_path: Path) -> None:
+    """Verifies -change for inter-library references between siblings."""
+    libs_dir = tmp_path / "libs"
+    libs_dir.mkdir()
+    (libs_dir / "libA.dylib").write_bytes(b"")
+
+    linked = ["/opt/modular/lib/libB.dylib"]
+
+    with (
+        patch("hatch_mojo.runtime.subprocess.run") as mock_run,
+        patch("hatch_mojo.runtime._get_linked_libraries", return_value=linked),
+        patch("hatch_mojo.runtime._strip_absolute_rpaths"),
+    ):
+        _patch_macos_dylibs(libs_dir, ["libA.dylib", "libB.dylib"])
+
+    calls = mock_run.call_args_list
+    # -id for libA
+    assert calls[0].args[0] == [
+        "install_name_tool",
+        "-id",
+        "@rpath/libA.dylib",
+        str(libs_dir / "libA.dylib"),
+    ]
+    # -change for libB reference
+    assert calls[1].args[0] == [
+        "install_name_tool",
+        "-change",
+        "/opt/modular/lib/libB.dylib",
+        "@rpath/libB.dylib",
+        str(libs_dir / "libA.dylib"),
+    ]
+    # codesign for libA
+    assert calls[2].args[0] == [
+        "codesign",
+        "-s",
+        "-",
+        "-f",
+        str(libs_dir / "libA.dylib"),
+    ]
+
+
+def test_patch_macos_dylibs_ignores_system_libs(tmp_path: Path) -> None:
+    """System libs (/usr/lib/..., /System/...) are not rewritten."""
+    libs_dir = tmp_path / "libs"
+    libs_dir.mkdir()
+    (libs_dir / "libFoo.dylib").write_bytes(b"")
+
+    linked = ["/usr/lib/libSystem.B.dylib", "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"]
+
+    with (
+        patch("hatch_mojo.runtime.subprocess.run") as mock_run,
+        patch("hatch_mojo.runtime._get_linked_libraries", return_value=linked),
+        patch("hatch_mojo.runtime._strip_absolute_rpaths"),
+    ):
+        _patch_macos_dylibs(libs_dir, ["libFoo.dylib"])
+
+    # -id call + codesign, no -change calls for system libs
+    assert mock_run.call_count == 2
+    assert calls_contain_flag(mock_run.call_args_list, "-id")
+    assert calls_contain_flag(mock_run.call_args_list, "codesign")
+
+
+def test_patch_macos_extension_rewrites_refs_and_adds_rpath(tmp_path: Path) -> None:
+    """Full extension patching: -change for bundled libs, then -add_rpath."""
+    ext = tmp_path / "_core.so"
+    ext.write_bytes(b"")
+    linked = [
+        "/opt/modular/lib/libKGENCompilerRTShared.dylib",
+        "/usr/lib/libSystem.B.dylib",
+    ]
+    lib_filenames = ["libKGENCompilerRTShared.dylib", "libAsyncRTRuntimeGlobals.dylib"]
+    rpath = "@loader_path:@loader_path/../mogemma.libs"
+
+    with (
+        patch("hatch_mojo.runtime.subprocess.run") as mock_run,
+        patch("hatch_mojo.runtime._get_linked_libraries", return_value=linked),
+        patch("hatch_mojo.runtime._has_rpath", return_value=False),
+    ):
+        _patch_macos_extension(ext, lib_filenames, rpath)
+
+    calls = mock_run.call_args_list
+    # -change for the modular lib
+    assert calls[0].args[0] == [
+        "install_name_tool",
+        "-change",
+        "/opt/modular/lib/libKGENCompilerRTShared.dylib",
+        "@rpath/libKGENCompilerRTShared.dylib",
+        str(ext),
+    ]
+    # -add_rpath
+    assert calls[1].args[0] == [
+        "install_name_tool",
+        "-add_rpath",
+        rpath,
+        str(ext),
+    ]
+    # codesign
+    assert calls[2].args[0] == [
+        "codesign",
+        "-s",
+        "-",
+        "-f",
+        str(ext),
+    ]
+
+
+def test_patch_macos_extension_skips_existing_rpath(tmp_path: Path) -> None:
+    """When the rpath already exists, -add_rpath is not called."""
+    ext = tmp_path / "_core.so"
+    ext.write_bytes(b"")
+    rpath = "@loader_path:@loader_path/../mogemma.libs"
+
+    with (
+        patch("hatch_mojo.runtime.subprocess.run") as mock_run,
+        patch("hatch_mojo.runtime._get_linked_libraries", return_value=[]),
+        patch("hatch_mojo.runtime._has_rpath", return_value=True),
+    ):
+        _patch_macos_extension(ext, ["libFoo.dylib"], rpath)
+
+    # Only codesign should be called — no -add_rpath
+    assert mock_run.call_count == 1
+    assert mock_run.call_args_list[0].args[0] == [
+        "codesign",
+        "-s",
+        "-",
+        "-f",
+        str(ext),
+    ]
+
+
+# ── _resign_ad_hoc ─────────────────────────────────────────────────────────
+
+
+def test_resign_ad_hoc(tmp_path: Path) -> None:
+    target = tmp_path / "lib.dylib"
+    target.write_bytes(b"")
+    with patch("hatch_mojo.runtime.subprocess.run") as mock_run:
+        _resign_ad_hoc(target)
+    mock_run.assert_called_once_with(
+        ["codesign", "-s", "-", "-f", str(target)],
+        check=True,
+        capture_output=True,
+    )
+
+
+# ── bundle_runtime_libs: write permissions ─────────────────────────────────
+
+
+def test_bundle_ensures_writable_copies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Copied libs must be writable even if source is read-only."""
+    modular = tmp_path / "modular"
+    _make_modular_lib(modular)
+    lib_dir = modular / "lib"
+    # Make source libs read-only
+    for f in lib_dir.iterdir():
+        f.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    monkeypatch.setenv("MODULAR_LIB_DIR", str(lib_dir))
+
+    job = _ext_job(tmp_path, module="mogemma._core")
+
+    with (
+        patch.object(sys, "platform", "linux"),
+        patch("hatch_mojo.runtime.subprocess.run"),
+    ):
+        bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
+
+    libs_dir = tmp_path / "build" / "mojo" / "mogemma.libs"
+    for f in libs_dir.iterdir():
+        assert f.stat().st_mode & stat.S_IWUSR, f"{f.name} should be writable"
+
+
+# ── _write_license_notice ───────────────────────────────────────────────────
+
+
+def test_license_notice_content(tmp_path: Path) -> None:
+    """Notice file lists all bundled libraries in sorted order."""
+    libs_dir = tmp_path / "pkg.libs"
+    libs_dir.mkdir()
+    modular_lib = tmp_path / "modular" / "lib"
+    modular_lib.mkdir(parents=True)
+
+    filenames = ["libB.so", "libA.so"]
+    entries = _write_license_notice(libs_dir, filenames, modular_lib)
+
+    notice = libs_dir / "NOTICE.mojo-runtime"
+    assert notice.exists()
+    content = notice.read_text()
+    assert "  - libA.so" in content
+    assert "  - libB.so" in content
+    # Sorted: A before B
+    assert content.index("libA.so") < content.index("libB.so")
+    assert "Modular Community License" in content
+    assert entries[0] == (str(notice), "pkg.libs/NOTICE.mojo-runtime")
+
+
+def test_bundle_copies_sdk_license_when_present(tmp_path: Path) -> None:
+    """SDK LICENSE is copied as LICENSE.mojo-runtime when it exists."""
+    libs_dir = tmp_path / "pkg.libs"
+    libs_dir.mkdir()
+    modular_dir = tmp_path / "modular"
+    modular_lib = modular_dir / "lib"
+    modular_lib.mkdir(parents=True)
+    (modular_dir / "LICENSE").write_text("Modular license text")
+
+    entries = _write_license_notice(libs_dir, ["libFoo.so"], modular_lib)
+
+    assert len(entries) == 2
+    license_dest = libs_dir / "LICENSE.mojo-runtime"
+    assert license_dest.exists()
+    assert license_dest.read_text() == "Modular license text"
+    assert entries[1] == (str(license_dest), "pkg.libs/LICENSE.mojo-runtime")
+
+
+def test_bundle_skips_sdk_license_when_absent(tmp_path: Path) -> None:
+    """No LICENSE.mojo-runtime when SDK directory has no LICENSE file."""
+    libs_dir = tmp_path / "pkg.libs"
+    libs_dir.mkdir()
+    modular_lib = tmp_path / "modular" / "lib"
+    modular_lib.mkdir(parents=True)
+
+    entries = _write_license_notice(libs_dir, ["libFoo.so"], modular_lib)
+
+    assert len(entries) == 1  # only NOTICE, no LICENSE
+    assert not (libs_dir / "LICENSE.mojo-runtime").exists()
+
+
+def test_bundle_includes_license_notice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """bundle_runtime_libs() includes NOTICE.mojo-runtime in force_include."""
+    modular = tmp_path / "modular"
+    _make_modular_lib(modular)
+    monkeypatch.setenv("MODULAR_LIB_DIR", str(modular / "lib"))
+
+    job = _ext_job(tmp_path, module="mogemma._core")
+
+    with (
+        patch.object(sys, "platform", "linux"),
+        patch("hatch_mojo.runtime.subprocess.run"),
+    ):
+        result = bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
+
+    assert any(v == "mogemma.libs/NOTICE.mojo-runtime" for v in result.values())
+    notice_path = tmp_path / "build" / "mojo" / "mogemma.libs" / "NOTICE.mojo-runtime"
+    assert notice_path.exists()
+    content = notice_path.read_text()
+    for base in _RUNTIME_LIB_BASES:
+        assert _lib_filename(base) in content
+
+
+# ── bundle_runtime_libs: macOS full flow ───────────────────────────────────
+
+
+def test_bundle_full_flow_darwin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end macOS bundling with mocked subprocess."""
+    # Mock otool to return empty deps (simplifies assertions)
+    mock_result = SimpleNamespace(stdout="/path/to/lib:\n")
+    with (
+        patch.object(sys, "platform", "darwin"),
+        patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result),
+    ):
+        # Create modular lib dir inside mock so _sentinel() returns .dylib
+        modular = tmp_path / "modular"
+        _make_modular_lib(modular)
+        lib_dir = modular / "lib"
+        monkeypatch.setenv("MODULAR_LIB_DIR", str(lib_dir))
+
+        job = _ext_job(tmp_path, module="mogemma._core")
+        result = bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
+
+    assert len(result) == len(_RUNTIME_LIB_BASES) + 1  # +1 for NOTICE
+    libs_dir = tmp_path / "build" / "mojo" / "mogemma.libs"
+    assert libs_dir.is_dir()
+
+    for base in _RUNTIME_LIB_BASES:
+        filename = f"lib{base}.dylib"
+        assert (libs_dir / filename).exists()
+        assert any(v == f"mogemma.libs/{filename}" for v in result.values())
+
+
+# ── test helpers ───────────────────────────────────────────────────────────
+
+
+def calls_contain_flag(call_list: Any, flag: str) -> bool:
+    """Check if any call in a mock's call_args_list contains the given flag."""
+    return any(flag in call.args[0] for call in call_list)

@@ -122,6 +122,46 @@ install = { kind = "scripts", path = "my-cli" }
 
 Supported install kinds: `package`, `data`, `scripts`, `root`, `force-include`
 
+## Runtime library bundling
+
+When building wheels that include Mojo python-extensions, set `bundle-libs = true` to copy the Mojo runtime libraries into the wheel:
+
+```toml
+[tool.hatch.build.targets.wheel.hooks.mojo]
+bundle-libs = true
+```
+
+This works on both Linux and macOS. On Linux, `patchelf` sets RPATH on each library. On macOS, `install_name_tool` rewrites dylib install names and inter-library references to use `@rpath`.
+
+A `NOTICE.mojo-runtime` file is automatically included in the wheel alongside the bundled libraries, listing the bundled files and their license terms (Modular Community License). If the SDK directory contains a `LICENSE` file, it is also copied into the wheel as `LICENSE.mojo-runtime`.
+
+### cibuildwheel
+
+When using [cibuildwheel](https://cibuildwheel.pypa.io/), keep the following in mind:
+
+**Linux (manylinux):** The Mojo SDK requires `manylinux_2_34` or newer due to GLIBCXX requirements. Standard `auditwheel repair` may reject the wheel — use a retag command instead:
+
+```toml
+[tool.cibuildwheel.linux]
+repair-wheel-command = "python -m wheel tags --remove --platform-tag manylinux_2_34_x86_64 {wheel} && mv {wheel} {dest_dir}"
+```
+
+**macOS:** With `bundle-libs = true`, macOS wheels work with standard `delocate`. No special repair command is needed:
+
+```toml
+[tool.cibuildwheel.macos]
+repair-wheel-command = "delocate-wheel -w {dest_dir} {wheel}"
+```
+
+**macOS SIP and `DYLD_LIBRARY_PATH`:** macOS System Integrity Protection (SIP) strips `DYLD_LIBRARY_PATH` from child processes. Setting it in `CIBW_ENVIRONMENT` will **not** propagate to the repair step. If you need it, pass it inline in the repair command:
+
+```toml
+[tool.cibuildwheel.macos]
+repair-wheel-command = "DYLD_LIBRARY_PATH=/path/to/libs delocate-wheel -w {dest_dir} {wheel}"
+```
+
+**libstdc++ on manylinux:** If the Mojo SDK links against a newer libstdc++ than the manylinux baseline provides, you may need to bundle it from conda-forge. This is a Mojo SDK limitation, not a hatch-mojo issue.
+
 ## Troubleshooting
 
 | Error | Fix |
