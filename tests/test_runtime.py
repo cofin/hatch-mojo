@@ -21,6 +21,7 @@ from hatch_mojo.runtime import (
     _resign_ad_hoc,
     _sentinel,
     _strip_absolute_rpaths,
+    _write_license_notice,
     bundle_runtime_libs,
     discover_modular_lib,
 )
@@ -242,7 +243,7 @@ def test_bundle_full_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     ):
         result = bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
 
-    assert len(result) == len(_RUNTIME_LIB_BASES)
+    assert len(result) == len(_RUNTIME_LIB_BASES) + 1  # +1 for NOTICE
     libs_dir = tmp_path / "build" / "mojo" / "mogemma.libs"
     assert libs_dir.is_dir()
 
@@ -266,7 +267,7 @@ def test_bundle_multiple_packages(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     ):
         result = bundle_runtime_libs(tmp_path, "build/mojo", [job_a, job_b], None)
 
-    assert len(result) == len(_RUNTIME_LIB_BASES) * 2
+    assert len(result) == (len(_RUNTIME_LIB_BASES) + 1) * 2  # +1 NOTICE per pkg
     assert any("pkga.libs/" in v for v in result.values())
     assert any("pkgb.libs/" in v for v in result.values())
 
@@ -655,6 +656,83 @@ def test_bundle_ensures_writable_copies(tmp_path: Path, monkeypatch: pytest.Monk
         assert f.stat().st_mode & stat.S_IWUSR, f"{f.name} should be writable"
 
 
+# ── _write_license_notice ───────────────────────────────────────────────────
+
+
+def test_license_notice_content(tmp_path: Path) -> None:
+    """Notice file lists all bundled libraries in sorted order."""
+    libs_dir = tmp_path / "pkg.libs"
+    libs_dir.mkdir()
+    modular_lib = tmp_path / "modular" / "lib"
+    modular_lib.mkdir(parents=True)
+
+    filenames = ["libB.so", "libA.so"]
+    entries = _write_license_notice(libs_dir, filenames, modular_lib)
+
+    notice = libs_dir / "NOTICE.mojo-runtime"
+    assert notice.exists()
+    content = notice.read_text()
+    assert "  - libA.so" in content
+    assert "  - libB.so" in content
+    # Sorted: A before B
+    assert content.index("libA.so") < content.index("libB.so")
+    assert "Modular Community License" in content
+    assert entries[0] == (str(notice), "pkg.libs/NOTICE.mojo-runtime")
+
+
+def test_bundle_copies_sdk_license_when_present(tmp_path: Path) -> None:
+    """SDK LICENSE is copied as LICENSE.mojo-runtime when it exists."""
+    libs_dir = tmp_path / "pkg.libs"
+    libs_dir.mkdir()
+    modular_dir = tmp_path / "modular"
+    modular_lib = modular_dir / "lib"
+    modular_lib.mkdir(parents=True)
+    (modular_dir / "LICENSE").write_text("Modular license text")
+
+    entries = _write_license_notice(libs_dir, ["libFoo.so"], modular_lib)
+
+    assert len(entries) == 2
+    license_dest = libs_dir / "LICENSE.mojo-runtime"
+    assert license_dest.exists()
+    assert license_dest.read_text() == "Modular license text"
+    assert entries[1] == (str(license_dest), "pkg.libs/LICENSE.mojo-runtime")
+
+
+def test_bundle_skips_sdk_license_when_absent(tmp_path: Path) -> None:
+    """No LICENSE.mojo-runtime when SDK directory has no LICENSE file."""
+    libs_dir = tmp_path / "pkg.libs"
+    libs_dir.mkdir()
+    modular_lib = tmp_path / "modular" / "lib"
+    modular_lib.mkdir(parents=True)
+
+    entries = _write_license_notice(libs_dir, ["libFoo.so"], modular_lib)
+
+    assert len(entries) == 1  # only NOTICE, no LICENSE
+    assert not (libs_dir / "LICENSE.mojo-runtime").exists()
+
+
+def test_bundle_includes_license_notice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """bundle_runtime_libs() includes NOTICE.mojo-runtime in force_include."""
+    modular = tmp_path / "modular"
+    _make_modular_lib(modular)
+    monkeypatch.setenv("MODULAR_LIB_DIR", str(modular / "lib"))
+
+    job = _ext_job(tmp_path, module="mogemma._core")
+
+    with (
+        patch.object(sys, "platform", "linux"),
+        patch("hatch_mojo.runtime.subprocess.run"),
+    ):
+        result = bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
+
+    assert any(v == "mogemma.libs/NOTICE.mojo-runtime" for v in result.values())
+    notice_path = tmp_path / "build" / "mojo" / "mogemma.libs" / "NOTICE.mojo-runtime"
+    assert notice_path.exists()
+    content = notice_path.read_text()
+    for base in _RUNTIME_LIB_BASES:
+        assert _lib_filename(base) in content
+
+
 # ── bundle_runtime_libs: macOS full flow ───────────────────────────────────
 
 
@@ -675,7 +753,7 @@ def test_bundle_full_flow_darwin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         job = _ext_job(tmp_path, module="mogemma._core")
         result = bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
 
-    assert len(result) == len(_RUNTIME_LIB_BASES)
+    assert len(result) == len(_RUNTIME_LIB_BASES) + 1  # +1 for NOTICE
     libs_dir = tmp_path / "build" / "mojo" / "mogemma.libs"
     assert libs_dir.is_dir()
 

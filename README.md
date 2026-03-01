@@ -133,6 +133,8 @@ bundle-libs = true
 
 This works on both Linux and macOS. On Linux, `patchelf` sets RPATH on each library. On macOS, `install_name_tool` rewrites dylib install names and inter-library references to use `@rpath`.
 
+A `NOTICE.mojo-runtime` file is automatically included in the wheel alongside the bundled libraries, listing the bundled files and their license terms (Modular Community License). If the SDK directory contains a `LICENSE` file, it is also copied into the wheel as `LICENSE.mojo-runtime`.
+
 ### cibuildwheel
 
 When using [cibuildwheel](https://cibuildwheel.pypa.io/), keep the following in mind:

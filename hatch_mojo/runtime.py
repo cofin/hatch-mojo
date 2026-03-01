@@ -85,6 +85,49 @@ def discover_modular_lib(root: Path, mojo_bin: str | None) -> Path:
     raise FileNotFoundError(msg)
 
 
+_MOJO_RUNTIME_NOTICE = """\
+This directory contains Mojo runtime libraries bundled from the Modular SDK.
+
+Bundled libraries:
+{lib_list}
+
+These libraries are copyright Modular Inc. and are distributed under the
+Modular Community License. The full license text is available at:
+
+    https://modular.com/legal/max-mojo-license
+
+By using this software you agree to the terms of the Modular Community License.
+"""
+
+
+def _write_license_notice(
+    libs_dir: Path,
+    lib_filenames: list[str],
+    modular_lib: Path,
+) -> list[tuple[str, str]]:
+    """Write license notices for bundled Mojo runtime libraries.
+
+    Returns a list of (abs_path, wheel_relative_path) entries for force_include.
+    """
+    pkg_libs = libs_dir.name  # e.g. "mogemma.libs"
+    entries: list[tuple[str, str]] = []
+
+    # Generate notice file
+    lib_list = "\n".join(f"  - {f}" for f in sorted(lib_filenames))
+    notice = libs_dir / "NOTICE.mojo-runtime"
+    notice.write_text(_MOJO_RUNTIME_NOTICE.format(lib_list=lib_list))
+    entries.append((str(notice), f"{pkg_libs}/NOTICE.mojo-runtime"))
+
+    # Copy SDK LICENSE if present
+    sdk_license = modular_lib.parent / "LICENSE"
+    if sdk_license.is_file():
+        dest = libs_dir / "LICENSE.mojo-runtime"
+        shutil.copy2(sdk_license, dest)
+        entries.append((str(dest), f"{pkg_libs}/LICENSE.mojo-runtime"))
+
+    return entries
+
+
 _OTOOL_LIB_RE: re.Pattern[str] = re.compile(r"^\s+(.+?)\s+\(compatibility version")
 _OTOOL_RPATH_RE: re.Pattern[str] = re.compile(r"^\s+path\s+(.+?)(?:\s+\(offset .+\))?$")
 
@@ -309,6 +352,9 @@ def bundle_runtime_libs(
             dest.chmod(dest.stat().st_mode | stat.S_IWUSR)
             lib_filenames.append(filename)
             force_include[str(dest)] = f"{pkg_name}.libs/{filename}"
+
+        # Add license notice for bundled libraries
+        force_include.update(_write_license_notice(libs_dir, lib_filenames, modular_lib))
 
         if sys.platform == "darwin":
             # Rewrite dylib install names and inter-library references
