@@ -17,7 +17,7 @@ _RUNTIME_LIB_BASES: tuple[str, ...] = (
     "KGENCompilerRTShared",
     "AsyncRTRuntimeGlobals",
     "MSupportGlobals",
-    "NVPTX",
+    *(("NVPTX",) if sys.platform != "darwin" else ()),
     "AsyncRTMojoBindings",
 )
 
