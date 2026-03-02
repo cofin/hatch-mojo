@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from hatch_mojo.runtime import (
     _patch_macos_extension,
     _patch_rpath,
     _resign_ad_hoc,
+    _resolve_modular_dependencies,
     _sentinel,
     _strip_absolute_rpaths,
     _write_license_notice,
@@ -373,12 +375,68 @@ def test_get_linked_libraries_parses_ldd_output(tmp_path: Path) -> None:
 
 
 def test_get_linked_libraries_raises_runtime_error_on_failure(tmp_path: Path) -> None:
-    import subprocess
     target = tmp_path / "test.so"
     target.write_bytes(b"")
     mock_err = subprocess.CalledProcessError(1, ["ldd", "test.so"], stderr="ldd: not found")
-    with patch("sys.platform", "linux"), patch("hatch_mojo.runtime.subprocess.run", side_effect=mock_err), pytest.raises(RuntimeError, match="Failed to resolve dependencies"):
+    with (
+        patch("sys.platform", "linux"),
+        patch("hatch_mojo.runtime.subprocess.run", side_effect=mock_err),
+        pytest.raises(RuntimeError, match="Failed to resolve dependencies"),
+    ):
         _get_linked_libraries(target)
+
+
+# ── _resolve_modular_dependencies ──────────────────────────────────────────
+
+
+def test_resolve_modular_dependencies_recursive(tmp_path: Path) -> None:
+    modular_lib = tmp_path / "modular_lib"
+    modular_lib.mkdir()
+    (modular_lib / "libA.so").write_text("")
+    (modular_lib / "libB.so").write_text("")
+    (modular_lib / "libC.so").write_text("")
+
+    entry = tmp_path / "entry.so"
+
+    # Mock _get_linked_libraries to return different things based on the path
+    def mock_get_linked_libraries(target: Path) -> list[str]:
+        if target.name == "entry.so":
+            return ["/opt/modular/lib/libA.so", "/usr/lib/libSystem.so"]
+        if target.name == "libA.so":
+            return ["/opt/modular/lib/libB.so"]
+        if target.name == "libB.so":
+            return ["/opt/modular/lib/libC.so"]
+        if target.name == "libC.so":
+            return []  # No more deps
+        return []
+
+    with patch("hatch_mojo.runtime._get_linked_libraries", side_effect=mock_get_linked_libraries):
+        result = _resolve_modular_dependencies(entry, modular_lib)
+
+    assert result == {"libA.so", "libB.so", "libC.so"}
+
+
+def test_resolve_modular_dependencies_handles_cycles(tmp_path: Path) -> None:
+    modular_lib = tmp_path / "modular_lib"
+    modular_lib.mkdir()
+    (modular_lib / "libA.so").write_text("")
+    (modular_lib / "libB.so").write_text("")
+
+    entry = tmp_path / "entry.so"
+
+    def mock_get_linked_libraries(target: Path) -> list[str]:
+        if target.name == "entry.so":
+            return ["/opt/modular/lib/libA.so"]
+        if target.name == "libA.so":
+            return ["/opt/modular/lib/libB.so"]
+        if target.name == "libB.so":
+            return ["/opt/modular/lib/libA.so"]  # Cycle!
+        return []
+
+    with patch("hatch_mojo.runtime._get_linked_libraries", side_effect=mock_get_linked_libraries):
+        result = _resolve_modular_dependencies(entry, modular_lib)
+
+    assert result == {"libA.so", "libB.so"}
 
 
 # ── _strip_absolute_rpaths ──────────────────────────────────────────────────

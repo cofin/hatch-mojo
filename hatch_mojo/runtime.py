@@ -173,6 +173,30 @@ def _get_linked_libraries(target: Path) -> list[str]:
     return libs
 
 
+def _resolve_modular_dependencies(entry_point: Path, modular_lib: Path) -> set[str]:
+    """Recursively find all Modular runtime dependencies for an entry point."""
+    seen: set[str] = set()
+    queue: list[Path] = [entry_point]
+
+    while queue:
+        current = queue.pop(0)
+        linked_libs = _get_linked_libraries(current)
+
+        for lib_path_str in linked_libs:
+            lib_path = Path(lib_path_str)
+            filename = lib_path.name
+
+            # Exclude standard system libraries by only keeping those
+            # that exist inside the modular_lib directory.
+            if filename not in seen:
+                candidate_path = modular_lib / filename
+                if candidate_path.exists():
+                    seen.add(filename)
+                    queue.append(candidate_path)
+
+    return seen
+
+
 def _strip_absolute_rpaths(target: Path) -> None:
     """Remove absolute RPATHs from a Mach-O binary.
 
