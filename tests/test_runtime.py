@@ -299,7 +299,7 @@ def test_bundle_raises_on_missing_runtime_lib(tmp_path: Path, monkeypatch: pytes
         patch.object(sys, "platform", "linux"),
         patch("hatch_mojo.runtime.subprocess.run"),
         patch("hatch_mojo.runtime._resolve_modular_dependencies", side_effect=mock_resolve),
-        pytest.raises(FileNotFoundError, match=r"Missing required Mojo runtime library: .*libMissing\\.so"),
+        pytest.raises(FileNotFoundError, match=r"Missing required Mojo runtime library: .*libMissing\.so"),
     ):
         bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
 
