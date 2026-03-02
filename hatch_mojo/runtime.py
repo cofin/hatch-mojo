@@ -13,14 +13,6 @@ from pathlib import Path
 
 from hatch_mojo.types import BuildJob
 
-_RUNTIME_LIB_BASES: tuple[str, ...] = (
-    "KGENCompilerRTShared",
-    "AsyncRTRuntimeGlobals",
-    "MSupportGlobals",
-    *(("NVPTX",) if sys.platform != "darwin" else ()),
-    "AsyncRTMojoBindings",
-)
-
 
 def _lib_filename(base: str) -> str:
     """Return platform-appropriate shared library filename."""
@@ -31,7 +23,7 @@ def _lib_filename(base: str) -> str:
 
 def _sentinel() -> str:
     """Return the platform-appropriate sentinel filename for library discovery."""
-    return _lib_filename(_RUNTIME_LIB_BASES[0])
+    return _lib_filename("KGENCompilerRTShared")
 
 
 def discover_modular_lib(root: Path, mojo_bin: str | None) -> Path:
@@ -138,7 +130,7 @@ def _get_linked_libraries(target: Path) -> list[str]:
     """Return library paths that *target* links against (macOS ``otool -L`` or Linux ``ldd``)."""
     is_mac = sys.platform == "darwin"
     cmd = ["otool", "-L", str(target)] if is_mac else ["ldd", str(target)]
-    
+
     try:
         result = subprocess.run(
             cmd,
@@ -151,7 +143,7 @@ def _get_linked_libraries(target: Path) -> list[str]:
         raise RuntimeError(msg) from e
 
     libs: list[str] = []
-    
+
     if is_mac:
         for line in result.stdout.splitlines()[1:]:  # skip first line (binary name)
             m = _OTOOL_LIB_RE.match(line)
@@ -164,7 +156,7 @@ def _get_linked_libraries(target: Path) -> list[str]:
             if m:
                 libs.append(m.group(2))
                 continue
-            
+
             # Match absolute entries like: /lib64/ld-linux-x86-64.so.2 (0x...)
             m_abs = _LDD_LIB_ABS_RE.match(line)
             if m_abs:
@@ -388,10 +380,19 @@ def bundle_runtime_libs(
         libs_dir = abs_build / f"{pkg_name}.libs"
         libs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Copy all runtime libs
-        lib_filenames: list[str] = []
-        for base in _RUNTIME_LIB_BASES:
-            filename = _lib_filename(base)
+        # Resolve required libs across all jobs in the package
+        required_libs: set[str] = set()
+        for job in pkg_jobs:
+            required_libs.update(_resolve_modular_dependencies(job.output_path, modular_lib))
+
+        # Ensure sentinel is always included as it implies the root modular directory
+        sentinel_name = _sentinel()
+        if sentinel_name not in required_libs and (modular_lib / sentinel_name).exists():
+            required_libs.add(sentinel_name)
+
+        # Copy all resolved runtime libs
+        lib_filenames: list[str] = sorted(required_libs)
+        for filename in lib_filenames:
             src = modular_lib / filename
             if not src.exists():
                 msg = f"Missing required Mojo runtime library: {src}"
@@ -399,7 +400,6 @@ def bundle_runtime_libs(
             dest = libs_dir / filename
             shutil.copy2(src, dest)
             dest.chmod(dest.stat().st_mode | stat.S_IWUSR)
-            lib_filenames.append(filename)
             force_include[str(dest)] = f"{pkg_name}.libs/{filename}"
 
         # Add license notice for bundled libraries

@@ -11,7 +11,6 @@ from unittest.mock import patch
 import pytest
 
 from hatch_mojo.runtime import (
-    _RUNTIME_LIB_BASES,
     _compute_extension_rpath,
     _get_linked_libraries,
     _has_rpath,
@@ -37,8 +36,8 @@ def _make_modular_lib(base: Path) -> Path:
     lib_dir = base / "lib"
     lib_dir.mkdir(parents=True, exist_ok=True)
     (lib_dir / _sentinel()).write_bytes(b"")
-    for name in _RUNTIME_LIB_BASES:
-        (lib_dir / _lib_filename(name)).write_bytes(b"fake-lib")
+    for name in ["KGENCompilerRTShared", "AsyncRTRuntimeGlobals", "MSupportGlobals"]:
+        (lib_dir / _lib_filename(name)).write_bytes(b"fake")
     return lib_dir
 
 
@@ -239,17 +238,21 @@ def test_bundle_full_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
 
     job = _ext_job(tmp_path, module="mogemma._core")
 
+    def mock_resolve(target: Path, modular_lib: Path) -> set[str]:
+        return {"libKGENCompilerRTShared.so", "libAsyncRTRuntimeGlobals.so", "libMSupportGlobals.so"}
+
     with (
         patch.object(sys, "platform", "linux"),
         patch("hatch_mojo.runtime.subprocess.run"),
+        patch("hatch_mojo.runtime._resolve_modular_dependencies", side_effect=mock_resolve),
     ):
         result = bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
 
-    assert len(result) == len(_RUNTIME_LIB_BASES) + 1  # +1 for NOTICE
+    assert len(result) == 4  # 3 fake libs + 1 NOTICE
     libs_dir = tmp_path / "build" / "mojo" / "mogemma.libs"
     assert libs_dir.is_dir()
 
-    for base in _RUNTIME_LIB_BASES:
+    for base in ["KGENCompilerRTShared", "AsyncRTRuntimeGlobals", "MSupportGlobals"]:
         filename = f"lib{base}.so"
         assert (libs_dir / filename).exists()
         assert any(v == f"mogemma.libs/{filename}" for v in result.values())
@@ -263,32 +266,40 @@ def test_bundle_multiple_packages(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     job_a = _ext_job(tmp_path, module="pkga._core", name="a")
     job_b = _ext_job(tmp_path, module="pkgb._core", name="b")
 
+    def mock_resolve(target: Path, modular_lib: Path) -> set[str]:
+        return {"libKGENCompilerRTShared.so", "libAsyncRTRuntimeGlobals.so", "libMSupportGlobals.so"}
+
     with (
         patch.object(sys, "platform", "linux"),
         patch("hatch_mojo.runtime.subprocess.run"),
+        patch("hatch_mojo.runtime._resolve_modular_dependencies", side_effect=mock_resolve),
     ):
         result = bundle_runtime_libs(tmp_path, "build/mojo", [job_a, job_b], None)
 
-    assert len(result) == (len(_RUNTIME_LIB_BASES) + 1) * 2  # +1 NOTICE per pkg
+    assert len(result) == 8  # 4 files per pkg
     assert any("pkga.libs/" in v for v in result.values())
     assert any("pkgb.libs/" in v for v in result.values())
 
 
 def test_bundle_raises_on_missing_runtime_lib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """If a runtime lib is missing from modular/lib, raise immediately."""
+    """If a discovered runtime lib is missing from modular/lib, raise immediately."""
     lib_dir = tmp_path / "modular" / "lib"
     lib_dir.mkdir(parents=True)
-    # Create sentinel + only the first lib, but omit the rest
+    # Create sentinel so discovery succeeds
     (lib_dir / _sentinel()).write_bytes(b"")
-    (lib_dir / _lib_filename(_RUNTIME_LIB_BASES[0])).write_bytes(b"fake")
     monkeypatch.setenv("MODULAR_LIB_DIR", str(lib_dir))
 
     job = _ext_job(tmp_path)
 
+    # Mock dynamic resolver to return a library that does not exist in modular/lib
+    def mock_resolve(target: Path, modular_lib: Path) -> set[str]:
+        return {"libMissing.so"}
+
     with (
         patch.object(sys, "platform", "linux"),
         patch("hatch_mojo.runtime.subprocess.run"),
-        pytest.raises(FileNotFoundError, match="Missing required Mojo runtime"),
+        patch("hatch_mojo.runtime._resolve_modular_dependencies", side_effect=mock_resolve),
+        pytest.raises(FileNotFoundError, match=r"Missing required Mojo runtime library: .*/libMissing\.so"),
     ):
         bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
 
@@ -729,9 +740,13 @@ def test_bundle_ensures_writable_copies(tmp_path: Path, monkeypatch: pytest.Monk
 
     job = _ext_job(tmp_path, module="mogemma._core")
 
+    def mock_resolve(target: Path, modular_lib: Path) -> set[str]:
+        return {"libKGENCompilerRTShared.so", "libAsyncRTRuntimeGlobals.so", "libMSupportGlobals.so"}
+
     with (
         patch.object(sys, "platform", "linux"),
         patch("hatch_mojo.runtime.subprocess.run"),
+        patch("hatch_mojo.runtime._resolve_modular_dependencies", side_effect=mock_resolve),
     ):
         bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
 
@@ -803,9 +818,13 @@ def test_bundle_includes_license_notice(tmp_path: Path, monkeypatch: pytest.Monk
 
     job = _ext_job(tmp_path, module="mogemma._core")
 
+    def mock_resolve(target: Path, modular_lib: Path) -> set[str]:
+        return {"libKGENCompilerRTShared.so", "libAsyncRTRuntimeGlobals.so", "libMSupportGlobals.so"}
+
     with (
         patch.object(sys, "platform", "linux"),
         patch("hatch_mojo.runtime.subprocess.run"),
+        patch("hatch_mojo.runtime._resolve_modular_dependencies", side_effect=mock_resolve),
     ):
         result = bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
 
@@ -813,7 +832,7 @@ def test_bundle_includes_license_notice(tmp_path: Path, monkeypatch: pytest.Monk
     notice_path = tmp_path / "build" / "mojo" / "mogemma.libs" / "NOTICE.mojo-runtime"
     assert notice_path.exists()
     content = notice_path.read_text()
-    for base in _RUNTIME_LIB_BASES:
+    for base in ["KGENCompilerRTShared", "AsyncRTRuntimeGlobals", "MSupportGlobals"]:
         assert _lib_filename(base) in content
 
 
@@ -822,11 +841,16 @@ def test_bundle_includes_license_notice(tmp_path: Path, monkeypatch: pytest.Monk
 
 def test_bundle_full_flow_darwin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """End-to-end macOS bundling with mocked subprocess."""
+
+    def mock_resolve_darwin(target: Path, modular_lib: Path) -> set[str]:
+        return {"libKGENCompilerRTShared.dylib", "libAsyncRTRuntimeGlobals.dylib", "libMSupportGlobals.dylib"}
+
     # Mock otool to return empty deps (simplifies assertions)
     mock_result = SimpleNamespace(stdout="/path/to/lib:\n")
     with (
         patch.object(sys, "platform", "darwin"),
         patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result),
+        patch("hatch_mojo.runtime._resolve_modular_dependencies", side_effect=mock_resolve_darwin),
     ):
         # Create modular lib dir inside mock so _sentinel() returns .dylib
         modular = tmp_path / "modular"
@@ -837,11 +861,11 @@ def test_bundle_full_flow_darwin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         job = _ext_job(tmp_path, module="mogemma._core")
         result = bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
 
-    assert len(result) == len(_RUNTIME_LIB_BASES) + 1  # +1 for NOTICE
+    assert len(result) == 4  # 3 fake libs + 1 NOTICE
     libs_dir = tmp_path / "build" / "mojo" / "mogemma.libs"
     assert libs_dir.is_dir()
 
-    for base in _RUNTIME_LIB_BASES:
+    for base in ["KGENCompilerRTShared", "AsyncRTRuntimeGlobals", "MSupportGlobals"]:
         filename = f"lib{base}.dylib"
         assert (libs_dir / filename).exists()
         assert any(v == f"mogemma.libs/{filename}" for v in result.values())
