@@ -129,22 +129,47 @@ def _write_license_notice(
 
 
 _OTOOL_LIB_RE: re.Pattern[str] = re.compile(r"^\s+(.+?)\s+\(compatibility version")
+_LDD_LIB_RE: re.Pattern[str] = re.compile(r"^\s*(.+?)\s+=>\s+(.+?)\s+\(0x[0-9a-f]+\)")
+_LDD_LIB_ABS_RE: re.Pattern[str] = re.compile(r"^\s*(/.+?)\s+\(0x[0-9a-f]+\)")
 _OTOOL_RPATH_RE: re.Pattern[str] = re.compile(r"^\s+path\s+(.+?)(?:\s+\(offset .+\))?$")
 
 
 def _get_linked_libraries(target: Path) -> list[str]:
-    """Return library paths that *target* links against (macOS ``otool -L``)."""
-    result = subprocess.run(
-        ["otool", "-L", str(target)],  # noqa: S607
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    """Return library paths that *target* links against (macOS ``otool -L`` or Linux ``ldd``)."""
+    is_mac = sys.platform == "darwin"
+    cmd = ["otool", "-L", str(target)] if is_mac else ["ldd", str(target)]
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        msg = f"Failed to resolve dependencies for {target} using {cmd[0]}: {e.stderr}"
+        raise RuntimeError(msg) from e
+
     libs: list[str] = []
-    for line in result.stdout.splitlines()[1:]:  # skip first line (binary name)
-        m = _OTOOL_LIB_RE.match(line)
-        if m:
-            libs.append(m.group(1))
+    
+    if is_mac:
+        for line in result.stdout.splitlines()[1:]:  # skip first line (binary name)
+            m = _OTOOL_LIB_RE.match(line)
+            if m:
+                libs.append(m.group(1))
+    else:
+        for line in result.stdout.splitlines():
+            # Match entries like: libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x...)
+            m = _LDD_LIB_RE.match(line)
+            if m:
+                libs.append(m.group(2))
+                continue
+            
+            # Match absolute entries like: /lib64/ld-linux-x86-64.so.2 (0x...)
+            m_abs = _LDD_LIB_ABS_RE.match(line)
+            if m_abs:
+                libs.append(m_abs.group(1))
+
     return libs
 
 

@@ -336,7 +336,7 @@ def test_get_linked_libraries_parses_otool_output(tmp_path: Path) -> None:
     mock_result = SimpleNamespace(stdout=otool_output)
     target = tmp_path / "test.dylib"
     target.write_bytes(b"")
-    with patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result):
+    with patch("sys.platform", "darwin"), patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result):
         libs = _get_linked_libraries(target)
     assert libs == [
         "/opt/modular/lib/libKGENCompilerRTShared.dylib",
@@ -350,9 +350,35 @@ def test_get_linked_libraries_handles_empty_deps(tmp_path: Path) -> None:
     mock_result = SimpleNamespace(stdout=otool_output)
     target = tmp_path / "test.dylib"
     target.write_bytes(b"")
-    with patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result):
+    with patch("sys.platform", "darwin"), patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result):
         libs = _get_linked_libraries(target)
     assert libs == []
+
+
+def test_get_linked_libraries_parses_ldd_output(tmp_path: Path) -> None:
+    ldd_output = (
+        "\tlinux-vdso.so.1 (0x00007fffa)\n"
+        "\tlibKGENCompilerRTShared.so => /opt/modular/lib/libKGENCompilerRTShared.so (0x00007fffb)\n"
+        "\t/lib64/ld-linux-x86-64.so.2 (0x00007fffc)\n"
+    )
+    mock_result = SimpleNamespace(stdout=ldd_output)
+    target = tmp_path / "test.so"
+    target.write_bytes(b"")
+    with patch("sys.platform", "linux"), patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result):
+        libs = _get_linked_libraries(target)
+    assert libs == [
+        "/opt/modular/lib/libKGENCompilerRTShared.so",
+        "/lib64/ld-linux-x86-64.so.2",
+    ]
+
+
+def test_get_linked_libraries_raises_runtime_error_on_failure(tmp_path: Path) -> None:
+    import subprocess
+    target = tmp_path / "test.so"
+    target.write_bytes(b"")
+    mock_err = subprocess.CalledProcessError(1, ["ldd", "test.so"], stderr="ldd: not found")
+    with patch("sys.platform", "linux"), patch("hatch_mojo.runtime.subprocess.run", side_effect=mock_err), pytest.raises(RuntimeError, match="Failed to resolve dependencies"):
+        _get_linked_libraries(target)
 
 
 # ── _strip_absolute_rpaths ──────────────────────────────────────────────────
