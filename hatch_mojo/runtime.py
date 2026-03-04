@@ -388,6 +388,7 @@ def bundle_runtime_libs(
         # Ensure sentinel is always included as it implies the root modular directory
         sentinel_name = _sentinel()
         if sentinel_name not in required_libs and (modular_lib / sentinel_name).exists():
+            required_libs.update(_resolve_modular_dependencies(modular_lib / sentinel_name, modular_lib))
             required_libs.add(sentinel_name)
 
         # Copy all resolved runtime libs
