@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,7 +11,6 @@ from unittest.mock import patch
 import pytest
 
 from hatch_mojo.runtime import (
-    _RUNTIME_LIB_BASES,
     _compute_extension_rpath,
     _get_linked_libraries,
     _has_rpath,
@@ -19,6 +19,7 @@ from hatch_mojo.runtime import (
     _patch_macos_extension,
     _patch_rpath,
     _resign_ad_hoc,
+    _resolve_modular_dependencies,
     _sentinel,
     _strip_absolute_rpaths,
     _write_license_notice,
@@ -35,8 +36,8 @@ def _make_modular_lib(base: Path) -> Path:
     lib_dir = base / "lib"
     lib_dir.mkdir(parents=True, exist_ok=True)
     (lib_dir / _sentinel()).write_bytes(b"")
-    for name in _RUNTIME_LIB_BASES:
-        (lib_dir / _lib_filename(name)).write_bytes(b"fake-lib")
+    for name in ["KGENCompilerRTShared", "AsyncRTRuntimeGlobals", "MSupportGlobals"]:
+        (lib_dir / _lib_filename(name)).write_bytes(b"fake")
     return lib_dir
 
 
@@ -237,17 +238,21 @@ def test_bundle_full_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
 
     job = _ext_job(tmp_path, module="mogemma._core")
 
+    def mock_resolve(target: Path, modular_lib: Path) -> set[str]:
+        return {"libKGENCompilerRTShared.so", "libAsyncRTRuntimeGlobals.so", "libMSupportGlobals.so"}
+
     with (
         patch.object(sys, "platform", "linux"),
         patch("hatch_mojo.runtime.subprocess.run"),
+        patch("hatch_mojo.runtime._resolve_modular_dependencies", side_effect=mock_resolve),
     ):
         result = bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
 
-    assert len(result) == len(_RUNTIME_LIB_BASES) + 1  # +1 for NOTICE
+    assert len(result) == 4  # 3 fake libs + 1 NOTICE
     libs_dir = tmp_path / "build" / "mojo" / "mogemma.libs"
     assert libs_dir.is_dir()
 
-    for base in _RUNTIME_LIB_BASES:
+    for base in ["KGENCompilerRTShared", "AsyncRTRuntimeGlobals", "MSupportGlobals"]:
         filename = f"lib{base}.so"
         assert (libs_dir / filename).exists()
         assert any(v == f"mogemma.libs/{filename}" for v in result.values())
@@ -261,32 +266,40 @@ def test_bundle_multiple_packages(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     job_a = _ext_job(tmp_path, module="pkga._core", name="a")
     job_b = _ext_job(tmp_path, module="pkgb._core", name="b")
 
+    def mock_resolve(target: Path, modular_lib: Path) -> set[str]:
+        return {"libKGENCompilerRTShared.so", "libAsyncRTRuntimeGlobals.so", "libMSupportGlobals.so"}
+
     with (
         patch.object(sys, "platform", "linux"),
         patch("hatch_mojo.runtime.subprocess.run"),
+        patch("hatch_mojo.runtime._resolve_modular_dependencies", side_effect=mock_resolve),
     ):
         result = bundle_runtime_libs(tmp_path, "build/mojo", [job_a, job_b], None)
 
-    assert len(result) == (len(_RUNTIME_LIB_BASES) + 1) * 2  # +1 NOTICE per pkg
+    assert len(result) == 8  # 4 files per pkg
     assert any("pkga.libs/" in v for v in result.values())
     assert any("pkgb.libs/" in v for v in result.values())
 
 
 def test_bundle_raises_on_missing_runtime_lib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """If a runtime lib is missing from modular/lib, raise immediately."""
+    """If a discovered runtime lib is missing from modular/lib, raise immediately."""
     lib_dir = tmp_path / "modular" / "lib"
     lib_dir.mkdir(parents=True)
-    # Create sentinel + only the first lib, but omit the rest
+    # Create sentinel so discovery succeeds
     (lib_dir / _sentinel()).write_bytes(b"")
-    (lib_dir / _lib_filename(_RUNTIME_LIB_BASES[0])).write_bytes(b"fake")
     monkeypatch.setenv("MODULAR_LIB_DIR", str(lib_dir))
 
     job = _ext_job(tmp_path)
 
+    # Mock dynamic resolver to return a library that does not exist in modular/lib
+    def mock_resolve(target: Path, modular_lib: Path) -> set[str]:
+        return {"libMissing.so"}
+
     with (
         patch.object(sys, "platform", "linux"),
         patch("hatch_mojo.runtime.subprocess.run"),
-        pytest.raises(FileNotFoundError, match="Missing required Mojo runtime"),
+        patch("hatch_mojo.runtime._resolve_modular_dependencies", side_effect=mock_resolve),
+        pytest.raises(FileNotFoundError, match=r"Missing required Mojo runtime library: .*libMissing\.so"),
     ):
         bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
 
@@ -336,7 +349,7 @@ def test_get_linked_libraries_parses_otool_output(tmp_path: Path) -> None:
     mock_result = SimpleNamespace(stdout=otool_output)
     target = tmp_path / "test.dylib"
     target.write_bytes(b"")
-    with patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result):
+    with patch("sys.platform", "darwin"), patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result):
         libs = _get_linked_libraries(target)
     assert libs == [
         "/opt/modular/lib/libKGENCompilerRTShared.dylib",
@@ -350,9 +363,91 @@ def test_get_linked_libraries_handles_empty_deps(tmp_path: Path) -> None:
     mock_result = SimpleNamespace(stdout=otool_output)
     target = tmp_path / "test.dylib"
     target.write_bytes(b"")
-    with patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result):
+    with patch("sys.platform", "darwin"), patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result):
         libs = _get_linked_libraries(target)
     assert libs == []
+
+
+def test_get_linked_libraries_parses_ldd_output(tmp_path: Path) -> None:
+    ldd_output = (
+        "\tlinux-vdso.so.1 (0x00007fffa)\n"
+        "\tlibKGENCompilerRTShared.so => /opt/modular/lib/libKGENCompilerRTShared.so (0x00007fffb)\n"
+        "\t/lib64/ld-linux-x86-64.so.2 (0x00007fffc)\n"
+    )
+    mock_result = SimpleNamespace(stdout=ldd_output)
+    target = tmp_path / "test.so"
+    target.write_bytes(b"")
+    with patch("sys.platform", "linux"), patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result):
+        libs = _get_linked_libraries(target)
+    assert libs == [
+        "/opt/modular/lib/libKGENCompilerRTShared.so",
+        "/lib64/ld-linux-x86-64.so.2",
+    ]
+
+
+def test_get_linked_libraries_raises_runtime_error_on_failure(tmp_path: Path) -> None:
+    target = tmp_path / "test.so"
+    target.write_bytes(b"")
+    mock_err = subprocess.CalledProcessError(1, ["ldd", "test.so"], stderr="ldd: not found")
+    with (
+        patch("sys.platform", "linux"),
+        patch("hatch_mojo.runtime.subprocess.run", side_effect=mock_err),
+        pytest.raises(RuntimeError, match="Failed to resolve dependencies"),
+    ):
+        _get_linked_libraries(target)
+
+
+# ── _resolve_modular_dependencies ──────────────────────────────────────────
+
+
+def test_resolve_modular_dependencies_recursive(tmp_path: Path) -> None:
+    modular_lib = tmp_path / "modular_lib"
+    modular_lib.mkdir()
+    (modular_lib / "libA.so").write_text("")
+    (modular_lib / "libB.so").write_text("")
+    (modular_lib / "libC.so").write_text("")
+
+    entry = tmp_path / "entry.so"
+
+    # Mock _get_linked_libraries to return different things based on the path
+    def mock_get_linked_libraries(target: Path) -> list[str]:
+        if target.name == "entry.so":
+            return ["/opt/modular/lib/libA.so", "/usr/lib/libSystem.so"]
+        if target.name == "libA.so":
+            return ["/opt/modular/lib/libB.so"]
+        if target.name == "libB.so":
+            return ["/opt/modular/lib/libC.so"]
+        if target.name == "libC.so":
+            return []  # No more deps
+        return []
+
+    with patch("hatch_mojo.runtime._get_linked_libraries", side_effect=mock_get_linked_libraries):
+        result = _resolve_modular_dependencies(entry, modular_lib)
+
+    assert result == {"libA.so", "libB.so", "libC.so"}
+
+
+def test_resolve_modular_dependencies_handles_cycles(tmp_path: Path) -> None:
+    modular_lib = tmp_path / "modular_lib"
+    modular_lib.mkdir()
+    (modular_lib / "libA.so").write_text("")
+    (modular_lib / "libB.so").write_text("")
+
+    entry = tmp_path / "entry.so"
+
+    def mock_get_linked_libraries(target: Path) -> list[str]:
+        if target.name == "entry.so":
+            return ["/opt/modular/lib/libA.so"]
+        if target.name == "libA.so":
+            return ["/opt/modular/lib/libB.so"]
+        if target.name == "libB.so":
+            return ["/opt/modular/lib/libA.so"]  # Cycle!
+        return []
+
+    with patch("hatch_mojo.runtime._get_linked_libraries", side_effect=mock_get_linked_libraries):
+        result = _resolve_modular_dependencies(entry, modular_lib)
+
+    assert result == {"libA.so", "libB.so"}
 
 
 # ── _strip_absolute_rpaths ──────────────────────────────────────────────────
@@ -645,9 +740,13 @@ def test_bundle_ensures_writable_copies(tmp_path: Path, monkeypatch: pytest.Monk
 
     job = _ext_job(tmp_path, module="mogemma._core")
 
+    def mock_resolve(target: Path, modular_lib: Path) -> set[str]:
+        return {"libKGENCompilerRTShared.so", "libAsyncRTRuntimeGlobals.so", "libMSupportGlobals.so"}
+
     with (
         patch.object(sys, "platform", "linux"),
         patch("hatch_mojo.runtime.subprocess.run"),
+        patch("hatch_mojo.runtime._resolve_modular_dependencies", side_effect=mock_resolve),
     ):
         bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
 
@@ -719,9 +818,13 @@ def test_bundle_includes_license_notice(tmp_path: Path, monkeypatch: pytest.Monk
 
     job = _ext_job(tmp_path, module="mogemma._core")
 
+    def mock_resolve(target: Path, modular_lib: Path) -> set[str]:
+        return {"libKGENCompilerRTShared.so", "libAsyncRTRuntimeGlobals.so", "libMSupportGlobals.so"}
+
     with (
         patch.object(sys, "platform", "linux"),
         patch("hatch_mojo.runtime.subprocess.run"),
+        patch("hatch_mojo.runtime._resolve_modular_dependencies", side_effect=mock_resolve),
     ):
         result = bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
 
@@ -729,7 +832,7 @@ def test_bundle_includes_license_notice(tmp_path: Path, monkeypatch: pytest.Monk
     notice_path = tmp_path / "build" / "mojo" / "mogemma.libs" / "NOTICE.mojo-runtime"
     assert notice_path.exists()
     content = notice_path.read_text()
-    for base in _RUNTIME_LIB_BASES:
+    for base in ["KGENCompilerRTShared", "AsyncRTRuntimeGlobals", "MSupportGlobals"]:
         assert _lib_filename(base) in content
 
 
@@ -738,11 +841,16 @@ def test_bundle_includes_license_notice(tmp_path: Path, monkeypatch: pytest.Monk
 
 def test_bundle_full_flow_darwin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """End-to-end macOS bundling with mocked subprocess."""
+
+    def mock_resolve_darwin(target: Path, modular_lib: Path) -> set[str]:
+        return {"libKGENCompilerRTShared.dylib", "libAsyncRTRuntimeGlobals.dylib", "libMSupportGlobals.dylib"}
+
     # Mock otool to return empty deps (simplifies assertions)
     mock_result = SimpleNamespace(stdout="/path/to/lib:\n")
     with (
         patch.object(sys, "platform", "darwin"),
         patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result),
+        patch("hatch_mojo.runtime._resolve_modular_dependencies", side_effect=mock_resolve_darwin),
     ):
         # Create modular lib dir inside mock so _sentinel() returns .dylib
         modular = tmp_path / "modular"
@@ -753,11 +861,11 @@ def test_bundle_full_flow_darwin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         job = _ext_job(tmp_path, module="mogemma._core")
         result = bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
 
-    assert len(result) == len(_RUNTIME_LIB_BASES) + 1  # +1 for NOTICE
+    assert len(result) == 4  # 3 fake libs + 1 NOTICE
     libs_dir = tmp_path / "build" / "mojo" / "mogemma.libs"
     assert libs_dir.is_dir()
 
-    for base in _RUNTIME_LIB_BASES:
+    for base in ["KGENCompilerRTShared", "AsyncRTRuntimeGlobals", "MSupportGlobals"]:
         filename = f"lib{base}.dylib"
         assert (libs_dir / filename).exists()
         assert any(v == f"mogemma.libs/{filename}" for v in result.values())
