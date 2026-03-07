@@ -286,8 +286,8 @@ def _patch_macos_dylibs(libs_dir: Path, lib_filenames: list[str]) -> None:
         _resign_ad_hoc(target)
 
 
-def _patch_macos_extension(ext: Path, lib_filenames: list[str], rpath: str) -> None:
-    """Rewrite an extension's references to bundled dylibs and add RPATH."""
+def _patch_macos_extension(ext: Path, lib_filenames: list[str], rpaths: list[str]) -> None:
+    """Rewrite an extension's references to bundled dylibs and add RPATHs."""
     linked = _get_linked_libraries(ext)
     for ref in linked:
         if ref.startswith(("@rpath/", "@loader_path/")):
@@ -307,41 +307,43 @@ def _patch_macos_extension(ext: Path, lib_filenames: list[str], rpath: str) -> N
                 check=True,
                 capture_output=True,
             )
-    if not _has_rpath(ext, rpath):
-        subprocess.run(
-            ["install_name_tool", "-add_rpath", rpath, str(ext)],  # noqa: S607
-            check=True,
-            capture_output=True,
-        )
+    for rpath in rpaths:
+        if not _has_rpath(ext, rpath):
+            subprocess.run(
+                ["install_name_tool", "-add_rpath", rpath, str(ext)],  # noqa: S607
+                check=True,
+                capture_output=True,
+            )
     _resign_ad_hoc(ext)
 
 
-def _compute_extension_rpath(module: str, pkg_name: str) -> str:
-    """Compute the RPATH for a python-extension based on its module depth.
+def _compute_extension_rpath(module: str, pkg_name: str) -> list[str]:
+    """Compute the RPATHs for a python-extension based on its module depth.
 
-    ``mogemma._core`` (depth 1) → ``$ORIGIN:$ORIGIN/../mogemma.libs``
-    ``pkg.sub._core`` (depth 2) → ``$ORIGIN:$ORIGIN/../../pkg.libs``
+    ``mogemma._core`` (depth 1) → ``[$ORIGIN, $ORIGIN/../mogemma.libs]``
+    ``pkg.sub._core`` (depth 2) → ``[$ORIGIN, $ORIGIN/../../pkg.libs]``
     """
     origin = "@loader_path" if sys.platform == "darwin" else "$ORIGIN"
     parts = module.split(".")
     depth = len(parts) - 1
     up = "/".join(".." for _ in range(depth))
-    return f"{origin}:{origin}/{up}/{pkg_name}.libs"
+    return [origin, f"{origin}/{up}/{pkg_name}.libs"]
 
 
-def _patch_rpath(target: Path, rpath: str) -> None:
+def _patch_rpath(target: Path, rpaths: list[str]) -> None:
     """Set RPATH on a shared library or extension."""
     if sys.platform == "win32":
         return
     if sys.platform == "darwin":
-        subprocess.run(
-            ["install_name_tool", "-add_rpath", rpath, str(target)],  # noqa: S607
-            check=True,
-            capture_output=True,
-        )
+        for rpath in rpaths:
+            subprocess.run(
+                ["install_name_tool", "-add_rpath", rpath, str(target)],  # noqa: S607
+                check=True,
+                capture_output=True,
+            )
     else:
         subprocess.run(
-            ["patchelf", "--set-rpath", rpath, str(target)],  # noqa: S607
+            ["patchelf", "--set-rpath", ":".join(rpaths), str(target)],  # noqa: S607
             check=True,
             capture_output=True,
         )
@@ -415,7 +417,7 @@ def bundle_runtime_libs(
         else:
             # Linux: set RPATH on each copied lib and extension
             for filename in lib_filenames:
-                _patch_rpath(libs_dir / filename, "$ORIGIN")
+                _patch_rpath(libs_dir / filename, ["$ORIGIN"])
             for job in pkg_jobs:
                 rpath = _compute_extension_rpath(job.module, pkg_name)  # type: ignore[arg-type]
                 _patch_rpath(job.output_path, rpath)

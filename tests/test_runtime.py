@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import pytest
 
@@ -137,25 +137,25 @@ def test_discover_env_var_missing_sentinel(tmp_path: Path, monkeypatch: pytest.M
 def test_rpath_depth_1_linux() -> None:
     with patch.object(sys, "platform", "linux"):
         result = _compute_extension_rpath("mogemma._core", "mogemma")
-        assert result == "$ORIGIN:$ORIGIN/../mogemma.libs"
+        assert result == ["$ORIGIN", "$ORIGIN/../mogemma.libs"]
 
 
 def test_rpath_depth_2_linux() -> None:
     with patch.object(sys, "platform", "linux"):
         result = _compute_extension_rpath("pkg.sub._core", "pkg")
-        assert result == "$ORIGIN:$ORIGIN/../../pkg.libs"
+        assert result == ["$ORIGIN", "$ORIGIN/../../pkg.libs"]
 
 
 def test_rpath_depth_1_darwin() -> None:
     with patch.object(sys, "platform", "darwin"):
         result = _compute_extension_rpath("mogemma._core", "mogemma")
-        assert result == "@loader_path:@loader_path/../mogemma.libs"
+        assert result == ["@loader_path", "@loader_path/../mogemma.libs"]
 
 
 def test_rpath_depth_3() -> None:
     with patch.object(sys, "platform", "linux"):
         result = _compute_extension_rpath("a.b.c._core", "a")
-        assert result == "$ORIGIN:$ORIGIN/../../../a.libs"
+        assert result == ["$ORIGIN", "$ORIGIN/../../../a.libs"]
 
 
 # ── _patch_rpath ─────────────────────────────────────────────────────────────
@@ -168,7 +168,7 @@ def test_patch_rpath_linux(tmp_path: Path) -> None:
         patch.object(sys, "platform", "linux"),
         patch("hatch_mojo.runtime.subprocess.run") as mock_run,
     ):
-        _patch_rpath(target, "$ORIGIN")
+        _patch_rpath(target, ["$ORIGIN"])
         mock_run.assert_called_once_with(
             ["patchelf", "--set-rpath", "$ORIGIN", str(target)],
             check=True,
@@ -183,12 +183,19 @@ def test_patch_rpath_darwin(tmp_path: Path) -> None:
         patch.object(sys, "platform", "darwin"),
         patch("hatch_mojo.runtime.subprocess.run") as mock_run,
     ):
-        _patch_rpath(target, "@loader_path")
-        mock_run.assert_called_once_with(
-            ["install_name_tool", "-add_rpath", "@loader_path", str(target)],
-            check=True,
-            capture_output=True,
-        )
+        _patch_rpath(target, ["@loader_path", "@loader_path/../pkg.libs"])
+        assert mock_run.call_args_list == [
+            call(
+                ["install_name_tool", "-add_rpath", "@loader_path", str(target)],
+                check=True,
+                capture_output=True,
+            ),
+            call(
+                ["install_name_tool", "-add_rpath", "@loader_path/../pkg.libs", str(target)],
+                check=True,
+                capture_output=True,
+            ),
+        ]
 
 
 def test_patch_rpath_windows_noop(tmp_path: Path) -> None:
@@ -198,7 +205,7 @@ def test_patch_rpath_windows_noop(tmp_path: Path) -> None:
         patch.object(sys, "platform", "win32"),
         patch("hatch_mojo.runtime.subprocess.run") as mock_run,
     ):
-        _patch_rpath(target, "anything")
+        _patch_rpath(target, ["anything"])
         mock_run.assert_not_called()
 
 
@@ -651,14 +658,14 @@ def test_patch_macos_extension_rewrites_refs_and_adds_rpath(tmp_path: Path) -> N
         "/usr/lib/libSystem.B.dylib",
     ]
     lib_filenames = ["libKGENCompilerRTShared.dylib", "libAsyncRTRuntimeGlobals.dylib"]
-    rpath = "@loader_path:@loader_path/../mogemma.libs"
+    rpaths = ["@loader_path", "@loader_path/../mogemma.libs"]
 
     with (
         patch("hatch_mojo.runtime.subprocess.run") as mock_run,
         patch("hatch_mojo.runtime._get_linked_libraries", return_value=linked),
         patch("hatch_mojo.runtime._has_rpath", return_value=False),
     ):
-        _patch_macos_extension(ext, lib_filenames, rpath)
+        _patch_macos_extension(ext, lib_filenames, rpaths)
 
     calls = mock_run.call_args_list
     # -change for the modular lib
@@ -669,15 +676,22 @@ def test_patch_macos_extension_rewrites_refs_and_adds_rpath(tmp_path: Path) -> N
         "@rpath/libKGENCompilerRTShared.dylib",
         str(ext),
     ]
-    # -add_rpath
+    # first -add_rpath
     assert calls[1].args[0] == [
         "install_name_tool",
         "-add_rpath",
-        rpath,
+        "@loader_path",
+        str(ext),
+    ]
+    # second -add_rpath
+    assert calls[2].args[0] == [
+        "install_name_tool",
+        "-add_rpath",
+        "@loader_path/../mogemma.libs",
         str(ext),
     ]
     # codesign
-    assert calls[2].args[0] == [
+    assert calls[3].args[0] == [
         "codesign",
         "-s",
         "-",
@@ -690,14 +704,14 @@ def test_patch_macos_extension_skips_existing_rpath(tmp_path: Path) -> None:
     """When the rpath already exists, -add_rpath is not called."""
     ext = tmp_path / "_core.so"
     ext.write_bytes(b"")
-    rpath = "@loader_path:@loader_path/../mogemma.libs"
+    rpaths = ["@loader_path", "@loader_path/../mogemma.libs"]
 
     with (
         patch("hatch_mojo.runtime.subprocess.run") as mock_run,
         patch("hatch_mojo.runtime._get_linked_libraries", return_value=[]),
         patch("hatch_mojo.runtime._has_rpath", return_value=True),
     ):
-        _patch_macos_extension(ext, ["libFoo.dylib"], rpath)
+        _patch_macos_extension(ext, ["libFoo.dylib"], rpaths)
 
     # Only codesign should be called — no -add_rpath
     assert mock_run.call_count == 1
