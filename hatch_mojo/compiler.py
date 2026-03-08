@@ -46,6 +46,11 @@ def build_command(mojo_bin: str, root: Path, job: BuildJob) -> list[str]:
         command.extend(["-I", include_dir])
     for define in job.defines:
         command.extend(["-D", define])
+
+    if sys.platform == "darwin" and job.emit in {"python-extension", "shared-lib", "executable"}:
+        # Ensure we have enough Mach-O header space to run install_name_tool later
+        command.extend(["-Xlinker", "-headerpad_max_install_names"])
+
     command.extend([*job.flags, str(job.input_path.relative_to(root)), "-o", str(job.output_path.relative_to(root))])
     return command
 
