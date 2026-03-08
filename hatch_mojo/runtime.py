@@ -123,7 +123,6 @@ def _write_license_notice(
 _OTOOL_LIB_RE: re.Pattern[str] = re.compile(r"^\s+(.+?)\s+\(compatibility version")
 _LDD_LIB_RE: re.Pattern[str] = re.compile(r"^\s*(.+?)\s+=>\s+(.+?)\s+\(0x[0-9a-f]+\)")
 _LDD_LIB_ABS_RE: re.Pattern[str] = re.compile(r"^\s*(/.+?)\s+\(0x[0-9a-f]+\)")
-_OTOOL_RPATH_RE: re.Pattern[str] = re.compile(r"^\s+path\s+(.+?)(?:\s+\(offset .+\))?$")
 
 
 def _get_linked_libraries(target: Path) -> list[str]:
@@ -189,6 +188,23 @@ def _resolve_modular_dependencies(entry_point: Path, modular_lib: Path) -> set[s
     return seen
 
 
+def _run_install_name_tool(args: list[str], ignore_errors: list[str] | None = None) -> None:
+    """Run install_name_tool and handle idempotency and error reporting."""
+    try:
+        subprocess.run(
+            ["install_name_tool", *args],  # noqa: S607
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr or ""
+        if ignore_errors and any(msg in stderr for msg in ignore_errors):
+            return
+        msg = f"install_name_tool failed: {stderr}"
+        raise RuntimeError(msg) from exc
+
+
 def _strip_absolute_rpaths(target: Path) -> None:
     """Remove absolute RPATHs from a Mach-O binary.
 
@@ -204,30 +220,13 @@ def _strip_absolute_rpaths(target: Path) -> None:
         text=True,
     )
     for line in result.stdout.splitlines():
-        m = _OTOOL_RPATH_RE.match(line)
-        if m:
-            rpath = m.group(1)
-            if not rpath.startswith("@"):
-                subprocess.run(
-                    ["install_name_tool", "-delete_rpath", rpath, str(target)],  # noqa: S607
-                    check=True,
-                    capture_output=True,
+        if "path " in line:
+            rpath = line.split("path ")[1].split(" (offset")[0].strip()
+            if rpath and not rpath.startswith("@"):
+                _run_install_name_tool(
+                    ["-delete_rpath", rpath, str(target)],
+                    ignore_errors=["no LC_RPATH found"],
                 )
-
-
-def _has_rpath(target: Path, rpath: str) -> bool:
-    """Check whether *target* already contains the given LC_RPATH entry."""
-    result = subprocess.run(
-        ["otool", "-l", str(target)],  # noqa: S607
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    for line in result.stdout.splitlines():
-        m = _OTOOL_RPATH_RE.match(line)
-        if m and m.group(1) == rpath:
-            return True
-    return False
 
 
 def _resign_ad_hoc(target: Path) -> None:
@@ -258,11 +257,7 @@ def _patch_macos_dylibs(libs_dir: Path, lib_filenames: list[str]) -> None:
         # Strip residual absolute RPATHs from SDK build environment
         _strip_absolute_rpaths(target)
         # Change own identity
-        subprocess.run(
-            ["install_name_tool", "-id", f"@rpath/{filename}", str(target)],  # noqa: S607
-            check=True,
-            capture_output=True,
-        )
+        _run_install_name_tool(["-id", f"@rpath/{filename}", str(target)])
         # Rewrite sibling references
         linked = _get_linked_libraries(target)
         for ref in linked:
@@ -272,17 +267,7 @@ def _patch_macos_dylibs(libs_dir: Path, lib_filenames: list[str]) -> None:
                 continue
             basename = Path(ref).name
             if basename in lib_filenames:
-                subprocess.run(
-                    [  # noqa: S607
-                        "install_name_tool",
-                        "-change",
-                        ref,
-                        f"@rpath/{basename}",
-                        str(target),
-                    ],
-                    check=True,
-                    capture_output=True,
-                )
+                _run_install_name_tool(["-change", ref, f"@rpath/{basename}", str(target)])
         _resign_ad_hoc(target)
 
 
@@ -296,24 +281,12 @@ def _patch_macos_extension(ext: Path, lib_filenames: list[str], rpaths: list[str
             continue
         basename = Path(ref).name
         if basename in lib_filenames:
-            subprocess.run(
-                [  # noqa: S607
-                    "install_name_tool",
-                    "-change",
-                    ref,
-                    f"@rpath/{basename}",
-                    str(ext),
-                ],
-                check=True,
-                capture_output=True,
-            )
+            _run_install_name_tool(["-change", ref, f"@rpath/{basename}", str(ext)])
     for rpath in rpaths:
-        if not _has_rpath(ext, rpath):
-            subprocess.run(
-                ["install_name_tool", "-add_rpath", rpath, str(ext)],  # noqa: S607
-                check=True,
-                capture_output=True,
-            )
+        _run_install_name_tool(
+            ["-add_rpath", rpath, str(ext)],
+            ignore_errors=["already contains LC_RPATH"],
+        )
     _resign_ad_hoc(ext)
 
 
@@ -336,10 +309,9 @@ def _patch_rpath(target: Path, rpaths: list[str]) -> None:
         return
     if sys.platform == "darwin":
         for rpath in rpaths:
-            subprocess.run(
-                ["install_name_tool", "-add_rpath", rpath, str(target)],  # noqa: S607
-                check=True,
-                capture_output=True,
+            _run_install_name_tool(
+                ["-add_rpath", rpath, str(target)],
+                ignore_errors=["already contains LC_RPATH"],
             )
     else:
         subprocess.run(

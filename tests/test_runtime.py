@@ -13,13 +13,13 @@ import pytest
 from hatch_mojo.runtime import (
     _compute_extension_rpath,
     _get_linked_libraries,
-    _has_rpath,
     _lib_filename,
     _patch_macos_dylibs,
     _patch_macos_extension,
     _patch_rpath,
     _resign_ad_hoc,
     _resolve_modular_dependencies,
+    _run_install_name_tool,
     _sentinel,
     _strip_absolute_rpaths,
     _write_license_notice,
@@ -189,11 +189,13 @@ def test_patch_rpath_darwin(tmp_path: Path) -> None:
                 ["install_name_tool", "-add_rpath", "@loader_path", str(target)],
                 check=True,
                 capture_output=True,
+                text=True,
             ),
             call(
                 ["install_name_tool", "-add_rpath", "@loader_path/../pkg.libs", str(target)],
                 check=True,
                 capture_output=True,
+                text=True,
             ),
         ]
 
@@ -532,25 +534,33 @@ def test_strip_absolute_rpaths_preserves_at_paths(tmp_path: Path) -> None:
     assert len(mock_run.call_args_list) == 1
 
 
-# ── _has_rpath ──────────────────────────────────────────────────────────────
+# ── _run_install_name_tool ───────────────────────────────────────────────────
 
 
-def test_has_rpath_true(tmp_path: Path) -> None:
-    target = tmp_path / "ext.so"
-    target.write_bytes(b"")
-    mock_result = SimpleNamespace(stdout=_OTOOL_LOAD_COMMANDS)
+def test_run_install_name_tool_success() -> None:
+    with patch("hatch_mojo.runtime.subprocess.run") as mock_run:
+        _run_install_name_tool(["-add_rpath", "foo", "bar"])
+    mock_run.assert_called_once_with(
+        ["install_name_tool", "-add_rpath", "foo", "bar"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
-    with patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result):
-        assert _has_rpath(target, "/opt/modular/lib") is True
+
+def test_run_install_name_tool_ignores_errors() -> None:
+    err = subprocess.CalledProcessError(1, [], stderr="already contains LC_RPATH")
+    with patch("hatch_mojo.runtime.subprocess.run", side_effect=err):
+        _run_install_name_tool(["-add_rpath", "foo", "bar"], ignore_errors=["already contains LC_RPATH"])
 
 
-def test_has_rpath_false(tmp_path: Path) -> None:
-    target = tmp_path / "ext.so"
-    target.write_bytes(b"")
-    mock_result = SimpleNamespace(stdout=_OTOOL_LOAD_COMMANDS)
-
-    with patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result):
-        assert _has_rpath(target, "/nonexistent/path") is False
+def test_run_install_name_tool_raises_on_other_errors() -> None:
+    err = subprocess.CalledProcessError(1, [], stderr="some random error")
+    with (
+        patch("hatch_mojo.runtime.subprocess.run", side_effect=err),
+        pytest.raises(RuntimeError, match="some random error"),
+    ):
+        _run_install_name_tool(["-add_rpath", "foo", "bar"], ignore_errors=["already contains LC_RPATH"])
 
 
 # ── _patch_macos_dylibs ────────────────────────────────────────────────────
@@ -663,7 +673,6 @@ def test_patch_macos_extension_rewrites_refs_and_adds_rpath(tmp_path: Path) -> N
     with (
         patch("hatch_mojo.runtime.subprocess.run") as mock_run,
         patch("hatch_mojo.runtime._get_linked_libraries", return_value=linked),
-        patch("hatch_mojo.runtime._has_rpath", return_value=False),
     ):
         _patch_macos_extension(ext, lib_filenames, rpaths)
 
@@ -701,21 +710,25 @@ def test_patch_macos_extension_rewrites_refs_and_adds_rpath(tmp_path: Path) -> N
 
 
 def test_patch_macos_extension_skips_existing_rpath(tmp_path: Path) -> None:
-    """When the rpath already exists, -add_rpath is not called."""
+    """When the rpath already exists, the error is ignored."""
     ext = tmp_path / "_core.so"
     ext.write_bytes(b"")
     rpaths = ["@loader_path", "@loader_path/../mogemma.libs"]
 
+    def mock_run_side_effect(args, **kwargs):
+        if "-add_rpath" in args:
+            raise subprocess.CalledProcessError(1, args, stderr="already contains LC_RPATH")
+        return SimpleNamespace(stdout="")
+
     with (
-        patch("hatch_mojo.runtime.subprocess.run") as mock_run,
+        patch("hatch_mojo.runtime.subprocess.run", side_effect=mock_run_side_effect) as mock_run,
         patch("hatch_mojo.runtime._get_linked_libraries", return_value=[]),
-        patch("hatch_mojo.runtime._has_rpath", return_value=True),
     ):
         _patch_macos_extension(ext, ["libFoo.dylib"], rpaths)
 
-    # Only codesign should be called — no -add_rpath
-    assert mock_run.call_count == 1
-    assert mock_run.call_args_list[0].args[0] == [
+    # -add_rpath will be called twice and fail twice, plus one codesign call = 3 total calls.
+    assert mock_run.call_count == 3
+    assert mock_run.call_args_list[2].args[0] == [
         "codesign",
         "-s",
         "-",
