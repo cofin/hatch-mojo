@@ -556,9 +556,11 @@ def test_run_install_name_tool_ignores_errors() -> None:
 
 def test_run_install_name_tool_raises_on_other_errors() -> None:
     err = subprocess.CalledProcessError(1, [], stderr="some random error")
-    with patch("hatch_mojo.runtime.subprocess.run", side_effect=err):
-        with pytest.raises(RuntimeError, match="some random error"):
-            _run_install_name_tool(["-add_rpath", "foo", "bar"], ignore_errors=["already contains LC_RPATH"])
+    with (
+        patch("hatch_mojo.runtime.subprocess.run", side_effect=err),
+        pytest.raises(RuntimeError, match="some random error"),
+    ):
+        _run_install_name_tool(["-add_rpath", "foo", "bar"], ignore_errors=["already contains LC_RPATH"])
 
 
 # ── _patch_macos_dylibs ────────────────────────────────────────────────────

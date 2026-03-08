@@ -267,9 +267,7 @@ def _patch_macos_dylibs(libs_dir: Path, lib_filenames: list[str]) -> None:
                 continue
             basename = Path(ref).name
             if basename in lib_filenames:
-                _run_install_name_tool(
-                    ["-change", ref, f"@rpath/{basename}", str(target)]
-                )
+                _run_install_name_tool(["-change", ref, f"@rpath/{basename}", str(target)])
         _resign_ad_hoc(target)
 
 
@@ -283,9 +281,7 @@ def _patch_macos_extension(ext: Path, lib_filenames: list[str], rpaths: list[str
             continue
         basename = Path(ref).name
         if basename in lib_filenames:
-            _run_install_name_tool(
-                ["-change", ref, f"@rpath/{basename}", str(ext)]
-            )
+            _run_install_name_tool(["-change", ref, f"@rpath/{basename}", str(ext)])
     for rpath in rpaths:
         _run_install_name_tool(
             ["-add_rpath", rpath, str(ext)],
