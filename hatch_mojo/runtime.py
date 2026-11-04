@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import os
 import re
@@ -26,53 +27,135 @@ def _sentinel() -> str:
     return _lib_filename("KGENCompilerRTShared")
 
 
+_SDK_LIB_PACKAGES: tuple[str, ...] = ("modular", "mojo", "mojo_compiler", "max")
+_SDK_SPEC_PACKAGES: tuple[str, ...] = ("mojo", "mojo_compiler", "max", "modular")
+_VENV_SITE_PATTERNS: tuple[str, ...] = (
+    "lib/python*/site-packages",
+    "lib64/python*/site-packages",
+    "lib/python*/dist-packages",
+    "Lib/site-packages",
+)
+
+
+def _has_sentinel(candidate: Path) -> bool:
+    """Return True when *candidate* contains the Mojo runtime sentinel library."""
+    return (candidate / _sentinel()).exists()
+
+
+def _discover_from_mojo_bin(mojo_bin: str) -> Path | None:
+    """Locate runtime libraries co-located with or inside the venv of *mojo_bin*."""
+    resolved = mojo_bin
+    if not Path(mojo_bin).exists():
+        which_match = shutil.which(mojo_bin)
+        if which_match:
+            resolved = which_match
+
+    cursor = Path(resolved).resolve().parent
+    for _ in range(6):
+        direct_lib = cursor / "lib"
+        if _has_sentinel(direct_lib):
+            return direct_lib
+
+        for pkg in _SDK_LIB_PACKAGES:
+            sibling_lib = cursor / pkg / "lib"
+            if _has_sentinel(sibling_lib):
+                return sibling_lib
+
+        for pattern in _VENV_SITE_PATTERNS:
+            for site_dir in sorted(cursor.glob(pattern)):
+                for pkg in _SDK_LIB_PACKAGES:
+                    venv_lib = site_dir / pkg / "lib"
+                    if _has_sentinel(venv_lib):
+                        return venv_lib
+
+        if cursor.parent == cursor:
+            break
+        cursor = cursor.parent
+    return None
+
+
+def _discover_from_package_specs() -> Path | None:
+    """Locate runtime libraries from installed ``mojo`` / ``mojo-compiler`` / ``max`` packages."""
+    try:
+        pkg_root_mod = importlib.import_module("mojo._package_root")
+        pkg_root = pkg_root_mod.get_package_root()
+    except (ImportError, AttributeError, RuntimeError, OSError):
+        pkg_root = None
+
+    if pkg_root:
+        pkg_lib = Path(pkg_root) / "lib"
+        if _has_sentinel(pkg_lib):
+            return pkg_lib
+
+    for spec_name in _SDK_SPEC_PACKAGES:
+        try:
+            spec = importlib.util.find_spec(spec_name)
+        except (ImportError, ValueError, AttributeError):
+            spec = None
+        if not spec:
+            continue
+
+        package_dirs: list[Path] = []
+        if spec.origin:
+            package_dirs.append(Path(spec.origin).parent)
+        if spec.submodule_search_locations:
+            package_dirs.extend(Path(loc) for loc in spec.submodule_search_locations)
+
+        for pkg_dir in package_dirs:
+            direct = pkg_dir / "lib"
+            if _has_sentinel(direct):
+                return direct
+            site_packages = pkg_dir.parent
+            for sibling in _SDK_LIB_PACKAGES:
+                sibling_lib = site_packages / sibling / "lib"
+                if _has_sentinel(sibling_lib):
+                    return sibling_lib
+
+    return None
+
+
 def discover_modular_lib(root: Path, mojo_bin: str | None) -> Path:
-    """Find the ``modular/lib/`` directory containing Mojo runtime libraries.
+    """Locate the directory containing ``libKGENCompilerRTShared`` in compiler-matched order.
 
     Search order:
-    1. ``MODULAR_LIB_DIR`` environment variable
-    2. ``importlib.util.find_spec("modular")``
-    3. Walk up from the mojo binary
-    4. Well-known cibuildwheel container paths
+    1. ``MODULAR_LIB_DIR`` environment variable.
+    2. Ancestor and ``site-packages`` layout relative to *mojo_bin* when provided.
+    3. ``mojo._package_root`` and ``importlib.util.find_spec`` across PyPI SDK packages.
+    4. ``CONDA_PREFIX``, ``/opt/modular/lib``, ``.pixi/envs/default/lib``, and ``.modular/lib``.
     """
     env_dir = os.environ.get("MODULAR_LIB_DIR")
     if env_dir:
-        path = Path(env_dir)
-        if (path / _sentinel()).exists():
-            return path
+        env_path = Path(env_dir)
+        if _has_sentinel(env_path):
+            return env_path
 
-    spec = importlib.util.find_spec("modular")
-    if spec:
-        if spec.origin:
-            candidate = Path(spec.origin).parent / "lib"
-            if (candidate / _sentinel()).exists():
-                return candidate
-        if spec.submodule_search_locations:
-            for loc in spec.submodule_search_locations:
-                candidate = Path(loc) / "lib"
-                if (candidate / _sentinel()).exists():
-                    return candidate
+    if mojo_bin is not None:
+        from_bin = _discover_from_mojo_bin(mojo_bin)
+        if from_bin is not None:
+            return from_bin
 
-    if mojo_bin:
-        cursor = Path(mojo_bin).resolve().parent
-        for _ in range(5):
-            candidate = cursor / "lib"
-            if (candidate / _sentinel()).exists():
-                return candidate
-            if cursor.parent == cursor:
-                break
-            cursor = cursor.parent
+    from_specs = _discover_from_package_specs()
+    if from_specs is not None:
+        return from_specs
 
-    for container_path in (
-        Path("/opt/modular/lib"),
-        root / ".modular" / "lib",
-    ):
-        if (container_path / _sentinel()).exists():
-            return container_path
+    fallback_paths: list[Path] = []
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        fallback_paths.append(Path(conda_prefix) / "lib")
+    fallback_paths.extend(
+        (
+            Path("/opt/modular/lib"),
+            root / ".pixi" / "envs" / "default" / "lib",
+            root / ".modular" / "lib",
+        )
+    )
+    for candidate in fallback_paths:
+        if _has_sentinel(candidate):
+            return candidate
 
     msg = (
-        "Could not locate Mojo runtime libraries (modular/lib). "
-        "Set MODULAR_LIB_DIR or ensure the modular package is importable."
+        "Could not locate Mojo runtime libraries (libKGENCompilerRTShared). "
+        "Add 'mojo-compiler>=1.2.0' to build-system.requires or set MODULAR_LIB_DIR."
     )
     raise FileNotFoundError(msg)
 

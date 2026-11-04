@@ -77,6 +77,14 @@ def test_lib_filename_darwin() -> None:
 # ── discover_modular_lib ────────────────────────────────────────────────────
 
 
+def _isolate_ambient_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear ambient SDK environment variables and package-root modules for fallback tests."""
+    monkeypatch.delenv("MODULAR_LIB_DIR", raising=False)
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    monkeypatch.setitem(sys.modules, "mojo", None)
+    monkeypatch.setitem(sys.modules, "mojo._package_root", None)
+
+
 def test_discover_from_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     lib_dir = _make_modular_lib(tmp_path / "modular")
     monkeypatch.setenv("MODULAR_LIB_DIR", str(lib_dir))
@@ -86,15 +94,123 @@ def test_discover_from_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 def test_discover_from_importlib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     modular_dir = tmp_path / "modular"
     lib_dir = _make_modular_lib(modular_dir)
-    monkeypatch.delenv("MODULAR_LIB_DIR", raising=False)
+    _isolate_ambient_sdk(monkeypatch)
 
-    fake_spec = SimpleNamespace(origin=str(modular_dir / "__init__.py"))
-    monkeypatch.setattr("hatch_mojo.runtime.importlib.util.find_spec", lambda _name: fake_spec)
+    fake_spec = SimpleNamespace(origin=str(modular_dir / "__init__.py"), submodule_search_locations=None)
+    monkeypatch.setattr(
+        "hatch_mojo.runtime.importlib.util.find_spec",
+        lambda name: fake_spec if name == "modular" else None,
+    )
     assert discover_modular_lib(tmp_path, None) == lib_dir
 
 
+def test_discover_from_mojo_package_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_ambient_sdk(monkeypatch)
+    monkeypatch.setattr("hatch_mojo.runtime.importlib.util.find_spec", lambda _name: None)
+
+    sdk = tmp_path / "pkg_sdk"
+    lib_dir = _make_modular_lib(sdk)
+    fake_pkg_root = SimpleNamespace(get_package_root=lambda: str(sdk))
+    monkeypatch.setitem(sys.modules, "mojo", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "mojo._package_root", fake_pkg_root)
+    assert discover_modular_lib(tmp_path, None) == lib_dir
+
+    fallback_lib = _make_modular_lib(tmp_path / ".modular")
+    monkeypatch.setitem(sys.modules, "mojo._package_root", SimpleNamespace(get_package_root=lambda: None))
+    assert discover_modular_lib(tmp_path, None) == fallback_lib
+
+
+def test_discover_mojo_bin_wins_over_ambient_package_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolate_ambient_sdk(monkeypatch)
+    monkeypatch.setattr("hatch_mojo.runtime.importlib.util.find_spec", lambda _name: None)
+
+    ambient_sdk = tmp_path / "ambient_sdk"
+    _make_modular_lib(ambient_sdk)
+    monkeypatch.setitem(sys.modules, "mojo", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "mojo._package_root",
+        SimpleNamespace(get_package_root=lambda: str(ambient_sdk)),
+    )
+
+    explicit_sdk = tmp_path / "explicit_sdk"
+    explicit_lib = _make_modular_lib(explicit_sdk)
+    mojo_bin = explicit_sdk / "bin" / "mojo"
+    mojo_bin.parent.mkdir(parents=True)
+    mojo_bin.write_bytes(b"")
+
+    assert discover_modular_lib(tmp_path, str(mojo_bin)) == explicit_lib
+
+
+def test_discover_from_mojo_spec_sibling_modular_lib(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolate_ambient_sdk(monkeypatch)
+    site_packages = tmp_path / "venv" / "lib" / "python3.12" / "site-packages"
+    mojo_pkg = site_packages / "mojo"
+    mojo_pkg.mkdir(parents=True)
+    origin_init = mojo_pkg / "__init__.py"
+    origin_init.write_text("", encoding="utf-8")
+
+    sibling_lib = _make_modular_lib(site_packages / "modular")
+    fake_spec = SimpleNamespace(origin=str(origin_init), submodule_search_locations=[str(mojo_pkg)])
+    monkeypatch.setattr(
+        "hatch_mojo.runtime.importlib.util.find_spec",
+        lambda name: fake_spec if name == "mojo" else None,
+    )
+    assert discover_modular_lib(tmp_path, None) == sibling_lib
+
+
+@pytest.mark.parametrize(
+    "site_rel",
+    [
+        "lib/python3.12/site-packages/modular",
+        "lib64/python3.12/site-packages/modular",
+        "lib/python3.12/dist-packages/modular",
+        "Lib/site-packages/modular",
+    ],
+)
+def test_discover_from_external_wrapper_venv_layouts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    site_rel: str,
+) -> None:
+    _isolate_ambient_sdk(monkeypatch)
+    monkeypatch.setattr("hatch_mojo.runtime.importlib.util.find_spec", lambda _name: None)
+
+    tool_venv = tmp_path / "tool-venv"
+    mojo_wrapper = tool_venv / "bin" / "mojo"
+    mojo_wrapper.parent.mkdir(parents=True)
+    mojo_wrapper.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    expected_lib = _make_modular_lib(tool_venv / site_rel)
+
+    assert discover_modular_lib(tmp_path, str(mojo_wrapper)) == expected_lib
+
+    monkeypatch.setattr(
+        "hatch_mojo.runtime.shutil.which",
+        lambda name: str(mojo_wrapper) if name == "mojo" else None,
+    )
+    assert discover_modular_lib(tmp_path, "mojo") == expected_lib
+
+
+def test_discover_from_conda_prefix_and_pixi(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_ambient_sdk(monkeypatch)
+    monkeypatch.setattr("hatch_mojo.runtime.importlib.util.find_spec", lambda _name: None)
+
+    pixi_lib = _make_modular_lib(tmp_path / ".pixi" / "envs" / "default")
+    assert discover_modular_lib(tmp_path, None) == pixi_lib
+
+    conda_prefix = tmp_path / "conda_env"
+    conda_lib = _make_modular_lib(conda_prefix)
+    monkeypatch.setenv("CONDA_PREFIX", str(conda_prefix))
+    assert discover_modular_lib(tmp_path, None) == conda_lib
+
+
 def test_discover_from_mojo_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # modular/bin/mojo → modular/lib/
     modular = tmp_path / "modular"
     lib_dir = _make_modular_lib(modular)
     bin_dir = modular / "bin"
@@ -102,22 +218,22 @@ def test_discover_from_mojo_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     mojo_bin = bin_dir / "mojo"
     mojo_bin.write_bytes(b"")
 
-    monkeypatch.delenv("MODULAR_LIB_DIR", raising=False)
+    _isolate_ambient_sdk(monkeypatch)
     monkeypatch.setattr("hatch_mojo.runtime.importlib.util.find_spec", lambda _name: None)
     assert discover_modular_lib(tmp_path, str(mojo_bin)) == lib_dir
 
 
 def test_discover_from_container_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     lib_dir = _make_modular_lib(tmp_path / ".modular")
-    monkeypatch.delenv("MODULAR_LIB_DIR", raising=False)
+    _isolate_ambient_sdk(monkeypatch)
     monkeypatch.setattr("hatch_mojo.runtime.importlib.util.find_spec", lambda _name: None)
     assert discover_modular_lib(tmp_path, None) == lib_dir
 
 
 def test_discover_not_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("MODULAR_LIB_DIR", raising=False)
+    _isolate_ambient_sdk(monkeypatch)
     monkeypatch.setattr("hatch_mojo.runtime.importlib.util.find_spec", lambda _name: None)
-    with pytest.raises(FileNotFoundError, match="Could not locate Mojo runtime"):
+    with pytest.raises(FileNotFoundError, match=r"mojo-compiler>=1\.2\.0.*MODULAR_LIB_DIR"):
         discover_modular_lib(tmp_path, None)
 
 
@@ -125,6 +241,7 @@ def test_discover_env_var_missing_sentinel(tmp_path: Path, monkeypatch: pytest.M
     """Env var pointing to a dir without the sentinel is skipped."""
     lib_dir = tmp_path / "fake" / "lib"
     lib_dir.mkdir(parents=True)
+    _isolate_ambient_sdk(monkeypatch)
     monkeypatch.setenv("MODULAR_LIB_DIR", str(lib_dir))
     monkeypatch.setattr("hatch_mojo.runtime.importlib.util.find_spec", lambda _name: None)
     with pytest.raises(FileNotFoundError):
@@ -320,13 +437,16 @@ def test_discover_from_namespace_package(tmp_path: Path, monkeypatch: pytest.Mon
     """Namespace package: spec.origin is None, submodule_search_locations has the path."""
     modular_dir = tmp_path / "modular"
     lib_dir = _make_modular_lib(modular_dir)
-    monkeypatch.delenv("MODULAR_LIB_DIR", raising=False)
+    _isolate_ambient_sdk(monkeypatch)
 
     fake_spec = SimpleNamespace(
         origin=None,
         submodule_search_locations=[str(modular_dir)],
     )
-    monkeypatch.setattr("hatch_mojo.runtime.importlib.util.find_spec", lambda _name: fake_spec)
+    monkeypatch.setattr(
+        "hatch_mojo.runtime.importlib.util.find_spec",
+        lambda name: fake_spec if name == "modular" else None,
+    )
     assert discover_modular_lib(tmp_path, None) == lib_dir
 
 
@@ -334,7 +454,7 @@ def test_discover_namespace_package_skips_bad_locations(tmp_path: Path, monkeypa
     """Falls through when namespace locations lack the sentinel file."""
     bad_dir = tmp_path / "wrong"
     bad_dir.mkdir()
-    monkeypatch.delenv("MODULAR_LIB_DIR", raising=False)
+    _isolate_ambient_sdk(monkeypatch)
 
     fake_spec = SimpleNamespace(
         origin=None,
