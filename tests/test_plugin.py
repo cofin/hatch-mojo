@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 from typing_extensions import Self
 
 from hatch_mojo.plugin import MojoBuildHook
-from hatch_mojo.types import BuildJob
+from hatch_mojo.types import BuildJob, RuntimeBundleResult
 
 if TYPE_CHECKING:
     import pytest
@@ -38,6 +38,8 @@ def _config(
     clean_before: bool = False,
     clean_after: bool = False,
     bundle_libs: bool = True,
+    cache: bool = True,
+    wheel_tag: str = "auto",
 ) -> Any:
     return SimpleNamespace(
         jobs=(object(),),
@@ -49,6 +51,9 @@ def _config(
         fail_fast=True,
         mojo_bin=None,
         bundle_libs=bundle_libs,
+        cache=cache,
+        wheel_tag=wheel_tag,
+        excluded_jobs=(),
     )
 
 
@@ -88,19 +93,36 @@ def test_initialize_serial_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_args, **_kwargs: "mojo")
 
     seq: list[str] = []
+    saved_manifests: list[tuple[str, list[Path]]] = []
+
+    def _record_save(root: Path, build_dir: str, outputs: list[Path], *, filename: str = "manifest.json") -> Path:
+        seq.append("save")
+        saved_manifests.append((filename, list(outputs)))
+        return root / build_dir / filename
+
     monkeypatch.setattr("hatch_mojo.plugin.clean_from_manifest", lambda *_args, **_kwargs: seq.append("clean"))
     monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kwargs: (True, "ok"))
-    monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.bundle_runtime_libs",
+        lambda **_kwargs: RuntimeBundleResult(
+            force_include={str(tmp_path / "staged.so"): "pkg.libs/libFoo.so"},
+            shared_data={str(tmp_path / "shared_lib.so"): "lib/pkg.libs/libBar.so"},
+            staged_files=(tmp_path / "staged.so", tmp_path / "shared_lib.so"),
+        ),
+    )
     monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: seq.append("register"))
-    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_args, **_kwargs: seq.append("save"))
+    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", _record_save)
 
     build_data: dict[str, Any] = {}
     MojoBuildHook.initialize(cast("Any", fake), "standard", build_data)
     assert "ok" in debugs
     assert warnings == []
-    assert seq.count("clean") == 2
+    assert seq.count("clean") == 1
     assert "register" in seq
     assert "save" in seq
+    assert build_data["force_include"][str(tmp_path / "staged.so")] == "pkg.libs/libFoo.so"
+    assert build_data["shared_data"][str(tmp_path / "shared_lib.so")] == "lib/pkg.libs/libBar.so"
+    assert saved_manifests == [("manifest.json", [job.output_path, tmp_path / "staged.so", tmp_path / "shared_lib.so"])]
 
 
 def test_initialize_parallel_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -112,7 +134,10 @@ def test_initialize_parallel_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_args, **_kwargs: _config(parallel=True))
     monkeypatch.setattr("hatch_mojo.plugin.plan_jobs_leveled", lambda *_args, **_kwargs: [jobs])
     monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_args, **_kwargs: "mojo")
-    monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.bundle_runtime_libs",
+        lambda **_kwargs: RuntimeBundleResult(force_include={}, shared_data={}, staged_files=()),
+    )
     monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: None)
     monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_args, **_kwargs: None)
 
@@ -179,25 +204,37 @@ def test_initialize_editable_copies_artifacts(monkeypatch: pytest.MonkeyPatch, t
     debugs: list[str] = []
     app = SimpleNamespace(display_warning=warnings.append, display_debug=debugs.append)
     fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app)
+    saved_manifests: list[tuple[str, list[Path]]] = []
+
+    def _record_save(root: Path, build_dir: str, outputs: list[Path], *, filename: str = "manifest.json") -> Path:
+        saved_manifests.append((filename, list(outputs)))
+        return root / build_dir / filename
+
     monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_args, **_kwargs: cfg)
     monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_args, **_kwargs: [job])
     monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_args, **_kwargs: "mojo")
     monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kwargs: (True, "ok"))
-    monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", lambda **_kwargs: {})
+    monkeypatch.setattr("hatch_mojo.plugin.patch_editable_runtime", lambda *_a, **_kw: ())
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.bundle_runtime_libs",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("bundle_runtime_libs must not run on editable")),
+    )
     monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: None)
-    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", _record_save)
 
     MojoBuildHook.initialize(cast("Any", fake), "editable", {})
     copied = pkg_dir / "_core.so"
     assert copied.exists()
     assert copied.read_text(encoding="utf-8") == "fake-binary"
+    assert ("editable-manifest.json", [copied]) in saved_manifests
 
 
 def test_initialize_calls_bundle_when_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     warnings: list[str] = []
     debugs: list[str] = []
     app = SimpleNamespace(display_warning=warnings.append, display_debug=debugs.append)
-    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app)
+    metadata = SimpleNamespace(core=SimpleNamespace(name="my-dist"))
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app, metadata=metadata)
     job = _job(tmp_path)
     monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_args, **_kwargs: _config(bundle_libs=True))
     monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_args, **_kwargs: [job])
@@ -206,17 +243,23 @@ def test_initialize_calls_bundle_when_enabled(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: None)
     monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_args, **_kwargs: None)
 
-    bundle_called = {"yes": False}
+    bundle_called: dict[str, Any] = {"yes": False, "dist_name": None}
 
-    def _fake_bundle(**_kwargs: Any) -> dict[str, str]:
+    def _fake_bundle(**kwargs: Any) -> RuntimeBundleResult:
         bundle_called["yes"] = True
-        return {"/tmp/staged.so": "pkg.libs/libFoo.so"}
+        bundle_called["dist_name"] = kwargs.get("dist_name")
+        return RuntimeBundleResult(
+            force_include={"/tmp/staged.so": "pkg.libs/libFoo.so"},
+            shared_data={},
+            staged_files=(Path("/tmp/staged.so"),),
+        )
 
     monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", _fake_bundle)
 
     build_data: dict[str, Any] = {}
     MojoBuildHook.initialize(cast("Any", fake), "standard", build_data)
     assert bundle_called["yes"] is True
+    assert bundle_called["dist_name"] == "my-dist"
     assert build_data["force_include"]["/tmp/staged.so"] == "pkg.libs/libFoo.so"
 
 
@@ -235,9 +278,9 @@ def test_initialize_skips_bundle_when_disabled(monkeypatch: pytest.MonkeyPatch, 
 
     bundle_called = {"yes": False}
 
-    def _fake_bundle(**_kwargs: Any) -> dict[str, str]:
+    def _fake_bundle(**_kwargs: Any) -> RuntimeBundleResult:
         bundle_called["yes"] = True
-        return {}
+        return RuntimeBundleResult(force_include={}, shared_data={}, staged_files=())
 
     monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", _fake_bundle)
 
@@ -248,7 +291,605 @@ def test_initialize_skips_bundle_when_disabled(monkeypatch: pytest.MonkeyPatch, 
 def test_clean_calls_clean_from_manifest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel")
     monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_args, **_kwargs: _config())
-    called: list[str] = []
-    monkeypatch.setattr("hatch_mojo.plugin.clean_from_manifest", lambda *_args, **_kwargs: called.append("clean"))
+    called: list[bool] = []
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.clean_from_manifest",
+        lambda *_args, include_editable=False, **_kwargs: called.append(include_editable),
+    )
     MojoBuildHook.clean(cast("Any", fake), ["wheel"])
-    assert called == ["clean"]
+    assert called == [True]
+
+
+def test_finalize_runs_clean_when_clean_after_build_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel")
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.parse_config",
+        lambda *_args, **_kwargs: _config(clean_after=True),
+    )
+    calls: list[tuple[Path, str, bool]] = []
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.clean_from_manifest",
+        lambda root, build_dir, *, include_editable=False: calls.append((root, build_dir, include_editable)),
+    )
+    MojoBuildHook.finalize(cast("Any", fake), "standard", {}, "dist/pkg.whl")
+    assert calls == [(tmp_path, "build/mojo", False)]
+
+
+def test_finalize_skips_editable_even_when_clean_after_build_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel")
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.parse_config",
+        lambda *_args, **_kwargs: _config(clean_after=True),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr("hatch_mojo.plugin.clean_from_manifest", lambda *_a, **_kw: calls.append("clean"))
+    MojoBuildHook.finalize(cast("Any", fake), "editable", {}, "dist/pkg.whl")
+    assert calls == []
+
+
+def test_finalize_noop_when_clean_after_build_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel")
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.parse_config",
+        lambda *_args, **_kwargs: _config(clean_after=False),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr("hatch_mojo.plugin.clean_from_manifest", lambda *_a, **_kw: calls.append("clean"))
+    MojoBuildHook.finalize(cast("Any", fake), "standard", {}, "dist/pkg.whl")
+    assert calls == []
+
+
+def test_initialize_sets_bypass_selection_for_standalone_shared_scripts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cfg = _config(bundle_libs=False)
+    job = BuildJob(
+        name="cli",
+        input_path=tmp_path / "cli.mojo",
+        output_path=tmp_path / "build/mojo/my-cli",
+        emit="executable",
+        module=None,
+        install_kind="scripts",
+        install_path="my-cli",
+        include_dirs=(),
+        defines=(),
+        flags=(),
+        env={},
+        depends_on=(),
+    )
+    app = SimpleNamespace(display_warning=lambda *_a: None, display_debug=lambda *_a: None)
+    target_config: dict[str, Any] = {}
+    build_config = SimpleNamespace(target_config=target_config)
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app, build_config=build_config)
+
+    monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_a, **_kw: cfg)
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_a, **_kw: [job])
+    monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_a, **_kw: "mojo")
+    monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kw: (True, "ok"))
+    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_a, **_kw: tmp_path / "manifest.json")
+
+    build_data: dict[str, Any] = {}
+    MojoBuildHook.initialize(cast("Any", fake), "standard", build_data)
+    assert build_data.get("shared_scripts") == {str(job.output_path): "my-cli"}
+    assert not build_data.get("force_include")
+    assert target_config["bypass-selection"] is True
+
+    explicit_target_config: dict[str, Any] = {"bypass-selection": False}
+    fake_explicit = SimpleNamespace(
+        root=str(tmp_path),
+        config={},
+        target_name="wheel",
+        app=app,
+        build_config=SimpleNamespace(target_config=explicit_target_config),
+    )
+    MojoBuildHook.initialize(cast("Any", fake_explicit), "standard", {})
+    assert explicit_target_config["bypass-selection"] is False
+
+
+def test_initialize_fail_fast_false_filters_failed_and_dependent_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cfg = _config(bundle_libs=True)
+    cfg.fail_fast = False
+    job_ok = _job(tmp_path, name="ok")
+    job_ok.output_path.write_bytes(b"ok")
+    job_bad = _job(tmp_path, name="bad")
+    job_dep = BuildJob(
+        name="dep",
+        input_path=tmp_path / "dep.mojo",
+        output_path=tmp_path / "dep.so",
+        emit="python-extension",
+        module="pkg._dep",
+        install_kind=None,
+        install_path=None,
+        include_dirs=(),
+        defines=(),
+        flags=(),
+        env={},
+        depends_on=("bad",),
+    )
+
+    warnings: list[str] = []
+    debugs: list[str] = []
+    app = SimpleNamespace(display_warning=warnings.append, display_debug=debugs.append)
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app)
+
+    monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_a, **_kw: cfg)
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_a, **_kw: [job_ok, job_bad, job_dep])
+    monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_a, **_kw: "mojo")
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.compile_job",
+        lambda *, job, **_kw: (False, f"failed:{job.name}") if job.name == "bad" else (True, f"ok:{job.name}"),
+    )
+
+    bundled_jobs: list[str] = []
+    registered_jobs: list[str] = []
+    saved_outputs: list[Path] = []
+
+    def _fake_bundle(*, jobs: list[BuildJob], **_kw: Any) -> RuntimeBundleResult:
+        bundled_jobs.extend(j.name for j in jobs)
+        return RuntimeBundleResult(force_include={}, shared_data={}, staged_files=())
+
+    def _fake_register(*, jobs: list[BuildJob], **_kw: Any) -> None:
+        registered_jobs.extend(j.name for j in jobs)
+
+    def _fake_save(root: Path, build_dir: str, outputs: list[Path], **_kw: Any) -> Path:
+        saved_outputs.extend(outputs)
+        return root / build_dir / "manifest.json"
+
+    monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", _fake_bundle)
+    monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", _fake_register)
+    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", _fake_save)
+
+    MojoBuildHook.initialize(cast("Any", fake), "standard", {})
+    assert bundled_jobs == ["ok"]
+    assert registered_jobs == ["ok"]
+    assert saved_outputs == [job_ok.output_path]
+    assert any("failed:bad" in w for w in warnings)
+    assert any("dep" in w for w in warnings)
+
+
+def test_initialize_editable_uses_raw_target_config_packages_without_force_include(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    custom_pkg = tmp_path / "python" / "my_pkg"
+    custom_pkg.mkdir(parents=True)
+    (custom_pkg / "__init__.py").write_text("", encoding="utf-8")
+
+    raw_out = tmp_path / "build" / "mojo" / "my_pkg" / "_core.so"
+    raw_out.parent.mkdir(parents=True)
+    raw_out.write_bytes(b"pristine-compiler-bytes")
+
+    job = BuildJob(
+        name="core",
+        input_path=tmp_path / "core.mojo",
+        output_path=raw_out,
+        emit="python-extension",
+        module="my_pkg._core",
+        install_kind=None,
+        install_path=None,
+        include_dirs=(),
+        defines=(),
+        flags=(),
+        env={},
+        depends_on=(),
+    )
+
+    class _ExplodingBuildConfig:
+        def __init__(self) -> None:
+            self.target_config: dict[str, Any] = {"packages": ["python/my_pkg"]}
+            self.build_config: dict[str, Any] = {}
+
+        @property
+        def packages(self) -> list[str]:
+            raise AssertionError("build_config.packages property must not be evaluated prematurely")
+
+    cfg = _config(bundle_libs=True)
+    cfg.skip_editable = False
+    app = SimpleNamespace(display_warning=lambda *_a: None, display_debug=lambda *_a: None)
+    fake = SimpleNamespace(
+        root=str(tmp_path),
+        config={},
+        target_name="wheel",
+        app=app,
+        build_config=_ExplodingBuildConfig(),
+    )
+
+    patched_targets: list[Path] = []
+
+    def _fake_patch_editable(
+        _root: Path, _build_dir: str, jobs: list[BuildJob], _mojo_bin: str | None
+    ) -> tuple[Path, ...]:
+        for j in jobs:
+            patched_targets.append(j.output_path)
+            j.output_path.write_bytes(b"patched-editable-bytes")
+        return ()
+
+    monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_a, **_kw: cfg)
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_a, **_kw: [job])
+    monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_a, **_kw: "mojo")
+    monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kw: (True, "ok"))
+    monkeypatch.setattr("hatch_mojo.plugin.patch_editable_runtime", _fake_patch_editable)
+
+    build_data: dict[str, Any] = {}
+    MojoBuildHook.initialize(cast("Any", fake), "editable", build_data)
+
+    copied = custom_pkg / "_core.so"
+    assert copied.read_bytes() == b"patched-editable-bytes"
+    assert raw_out.read_bytes() == b"pristine-compiler-bytes"
+    assert patched_targets == [copied]
+    assert not build_data.get("force_include")
+
+
+def test_initialize_editable_dev_mode_exact_copies_submodules_and_preserves_force_include(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pkg_dir = tmp_path / "src" / "my_pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+
+    sub_out = tmp_path / "build" / "mojo" / "my_pkg" / "_core.so"
+    top_out = tmp_path / "build" / "mojo" / "_top.so"
+    sub_out.parent.mkdir(parents=True)
+    sub_out.write_bytes(b"sub")
+    top_out.write_bytes(b"top")
+
+    jobs = [
+        BuildJob(
+            "sub", tmp_path / "a.mojo", sub_out, "python-extension", "my_pkg._core", None, None, (), (), (), {}, ()
+        ),
+        BuildJob("top", tmp_path / "b.mojo", top_out, "python-extension", "_top", None, None, (), (), (), {}, ()),
+    ]
+
+    cfg = _config(bundle_libs=False)
+    cfg.skip_editable = False
+    app = SimpleNamespace(display_warning=lambda *_a: None, display_debug=lambda *_a: None)
+    build_config = SimpleNamespace(
+        target_config={"dev-mode-exact": True},
+        build_config={},
+        get_force_include=lambda: {"/existing/readme.txt": "readme.txt"},
+    )
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app, build_config=build_config)
+
+    monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_a, **_kw: cfg)
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_a, **_kw: jobs)
+    monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_a, **_kw: "mojo")
+    monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kw: (True, "ok"))
+
+    build_data: dict[str, Any] = {}
+    MojoBuildHook.initialize(cast("Any", fake), "editable", build_data)
+
+    assert (pkg_dir / "_core.so").read_bytes() == b"sub"
+    assert not build_data.get("force_include")
+    fi_editable = build_data["force_include_editable"]
+    assert fi_editable["/existing/readme.txt"] == "readme.txt"
+    assert "_top.so" in fi_editable.values()
+    assert "my_pkg/_core.so" not in fi_editable.values()
+
+
+def test_initialize_forwards_cache_settings_to_compile_job(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = SimpleNamespace(display_warning=lambda *_a: None, display_debug=lambda *_a: None)
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app)
+    job = _job(tmp_path)
+    recorded: list[tuple[bool, Path | None]] = []
+
+    def _capture_compile(**kwargs: Any) -> tuple[bool, str]:
+        recorded.append((kwargs["use_cache"], kwargs["cache_dir"]))
+        return True, "ok"
+
+    monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_a, **_kw: _config(bundle_libs=False, cache=False))
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_a, **_kw: [job])
+    monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_a, **_kw: "mojo")
+    monkeypatch.setattr("hatch_mojo.plugin.compile_job", _capture_compile)
+    monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kw: None)
+    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_a, **_kw: tmp_path / "manifest.json")
+
+    MojoBuildHook.initialize(cast("Any", fake), "standard", {})
+    assert recorded == [(False, tmp_path / "build/mojo")]
+
+
+def test_initialize_forwards_wheel_tag_and_macos_max_compat(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = SimpleNamespace(display_warning=lambda *_a: None, display_debug=lambda *_a: None)
+    build_config = SimpleNamespace(macos_max_compat=True, target_config={})
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app, build_config=build_config)
+    job = _job(tmp_path)
+    recorded_reg: list[tuple[str, bool]] = []
+
+    def _capture_register(**kwargs: Any) -> None:
+        recorded_reg.append((kwargs["wheel_tag"], kwargs["macos_max_compat"]))
+
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.parse_config",
+        lambda *_a, **_kw: _config(bundle_libs=False, wheel_tag="py3-none"),
+    )
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_a, **_kw: [job])
+    monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_a, **_kw: "mojo")
+    monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kw: (True, "ok"))
+    monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", _capture_register)
+    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_a, **_kw: tmp_path / "manifest.json")
+
+    MojoBuildHook.initialize(cast("Any", fake), "standard", {})
+    assert recorded_reg == [("py3-none", True)]
+
+
+def test_editable_layout_and_staging_branches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    pkg_dir = tmp_path / "custom" / "my_pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+
+    raw_dir = tmp_path / "build" / "mojo"
+    raw_dir.mkdir(parents=True)
+    for fname in ("_miss.so", "libsub.so", "libroot.so", "libunk.so", "cli_bin", "dat_bin", "_top.so"):
+        (raw_dir / fname).write_bytes(b"x")
+
+    jobs = [
+        BuildJob(
+            "miss_ext",
+            tmp_path / "a.mojo",
+            raw_dir / "_miss.so",
+            "python-extension",
+            "unknown._miss",
+            None,
+            None,
+            (),
+            (),
+            (),
+            {},
+            (),
+        ),
+        BuildJob(
+            "pkg_sub",
+            tmp_path / "b.mojo",
+            raw_dir / "libsub.so",
+            "shared-lib",
+            None,
+            "package",
+            "my_pkg/native",
+            (),
+            (),
+            (),
+            {},
+            (),
+        ),
+        BuildJob(
+            "pkg_top",
+            tmp_path / "c.mojo",
+            raw_dir / "libroot.so",
+            "shared-lib",
+            None,
+            "package",
+            "my_pkg",
+            (),
+            (),
+            (),
+            {},
+            (),
+        ),
+        BuildJob(
+            "pkg_unk",
+            tmp_path / "d.mojo",
+            raw_dir / "libunk.so",
+            "shared-lib",
+            None,
+            "package",
+            "unknown_pkg",
+            (),
+            (),
+            (),
+            {},
+            (),
+        ),
+        BuildJob(
+            "cli", tmp_path / "e.mojo", raw_dir / "cli_bin", "executable", None, "scripts", "my-cli", (), (), (), {}, ()
+        ),
+        BuildJob("dat", tmp_path / "f.mojo", raw_dir / "dat_bin", "object", None, "data", "share", (), (), (), {}, ()),
+        BuildJob(
+            "top_ext",
+            tmp_path / "g.mojo",
+            raw_dir / "_top.so",
+            "python-extension",
+            "_top",
+            None,
+            None,
+            (),
+            (),
+            (),
+            {},
+            (),
+        ),
+    ]
+
+    cfg = _config(bundle_libs=False)
+    cfg.skip_editable = False
+    app = SimpleNamespace(display_warning=lambda *_a: None, display_debug=lambda *_a: None)
+    monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_a, **_kw: cfg)
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_a, **_kw: jobs)
+    monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_a, **_kw: "mojo")
+    monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kw: (True, "ok"))
+
+    global_bc = SimpleNamespace(
+        target_config={},
+        build_config={"packages": ["custom/my_pkg"], "sources": {"src": ""}, "dev-mode-exact": False},
+    )
+    fake_non_exact = SimpleNamespace(
+        root=str(tmp_path), config={}, target_name="wheel", app=app, build_config=global_bc
+    )
+    bd_non_exact: dict[str, Any] = {}
+    MojoBuildHook.initialize(cast("Any", fake_non_exact), "editable", bd_non_exact)
+    assert (pkg_dir / "native" / "libsub.so").is_file()
+    assert (pkg_dir / "libroot.so").is_file()
+    assert "my-cli" in bd_non_exact["shared_scripts"].values()
+    assert "share/dat_bin" in bd_non_exact["shared_data"].values()
+    assert "_top.so" in bd_non_exact["force_include"].values()
+
+    target_src_bc = SimpleNamespace(
+        target_config={"sources": ["src"]},
+        build_config={"dev-mode-exact": True},
+        get_force_include=lambda: None,
+    )
+    fake_exact_none_fi = SimpleNamespace(
+        root=str(tmp_path), config={}, target_name="wheel", app=app, build_config=target_src_bc
+    )
+    bd_exact_none_fi: dict[str, Any] = {}
+    MojoBuildHook.initialize(cast("Any", fake_exact_none_fi), "editable", bd_exact_none_fi)
+    assert "_top.so" in bd_exact_none_fi["force_include_editable"].values()
+
+    attr_exact_bc = SimpleNamespace(dev_mode_exact=True)
+    fake_attr_exact = SimpleNamespace(
+        root=str(tmp_path), config={}, target_name="wheel", app=app, build_config=attr_exact_bc
+    )
+    bd_attr_exact: dict[str, Any] = {}
+    MojoBuildHook.initialize(cast("Any", fake_attr_exact), "editable", bd_attr_exact)
+    assert "_top.so" in bd_attr_exact["force_include_editable"].values()
+
+    scripts_only = [jobs[4]]
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_a, **_kw: scripts_only)
+    fake_no_bc = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app)
+    bd_scripts_only: dict[str, Any] = {}
+    MojoBuildHook.initialize(cast("Any", fake_no_bc), "editable", bd_scripts_only)
+    assert "force_include" not in bd_scripts_only
+    assert "my-cli" in bd_scripts_only["shared_scripts"].values()
+
+
+def test_parallel_and_serial_empty_and_blocked_wave_branches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    warnings: list[str] = []
+    debugs: list[str] = []
+    app = SimpleNamespace(display_warning=warnings.append, display_debug=debugs.append)
+
+    serial_cfg = _config(parallel=False, bundle_libs=False)
+    monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_a, **_kw: serial_cfg)
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_a, **_kw: [])
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app)
+    MojoBuildHook.initialize(cast("Any", fake), "standard", {})
+
+    par_cfg = _config(parallel=True, bundle_libs=True)
+    par_cfg.fail_fast = False
+    monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_a, **_kw: par_cfg)
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs_leveled", lambda *_a, **_kw: [])
+    MojoBuildHook.initialize(cast("Any", fake), "standard", {})
+
+    j_bad = _job(tmp_path, name="bad")
+    j_ok = _job(tmp_path, name="ok")
+    j_blocked = BuildJob(
+        "blocked",
+        tmp_path / "bl.mojo",
+        tmp_path / "bl.so",
+        "python-extension",
+        "pkg._bl",
+        None,
+        None,
+        (),
+        (),
+        (),
+        {},
+        ("bad",),
+    )
+    j_single_ok = BuildJob(
+        "single_ok",
+        tmp_path / "so.mojo",
+        tmp_path / "so.so",
+        "python-extension",
+        "pkg._so",
+        None,
+        None,
+        (),
+        (),
+        (),
+        {},
+        ("ok",),
+    )
+    j_single_fail = BuildJob(
+        "single_fail",
+        tmp_path / "sf.mojo",
+        tmp_path / "sf.so",
+        "python-extension",
+        "pkg._sf",
+        None,
+        None,
+        (),
+        (),
+        (),
+        {},
+        ("ok",),
+    )
+    j_blocked_only = BuildJob(
+        "blocked_only",
+        tmp_path / "bo.mojo",
+        tmp_path / "bo.so",
+        "python-extension",
+        "pkg._bo",
+        None,
+        None,
+        (),
+        (),
+        (),
+        {},
+        ("single_fail",),
+    )
+
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.plan_jobs_leveled",
+        lambda *_a, **_kw: [[j_bad, j_ok], [j_blocked, j_single_ok], [j_single_fail], [j_blocked_only]],
+    )
+    monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_a, **_kw: "mojo")
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.compile_job",
+        lambda *, job, **_kw: (
+            (False, f"err:{job.name}") if job.name in {"bad", "single_fail"} else (True, f"ok:{job.name}")
+        ),
+    )
+
+    seen_dists: list[str | None] = []
+
+    def _capture_bundle(*, dist_name: str | None = None, **_kw: Any) -> RuntimeBundleResult:
+        seen_dists.append(dist_name)
+        return RuntimeBundleResult(force_include={}, shared_data={}, staged_files=())
+
+    monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", _capture_bundle)
+    monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kw: None)
+    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_a, **_kw: tmp_path / "manifest.json")
+
+    fake_fallback_meta = SimpleNamespace(
+        root=str(tmp_path),
+        config={},
+        target_name="wheel",
+        app=app,
+        metadata=SimpleNamespace(core=SimpleNamespace(name=""), name="fallback-dist"),
+    )
+    MojoBuildHook.initialize(cast("Any", fake_fallback_meta), "standard", {})
+
+    fake_empty_meta = SimpleNamespace(
+        root=str(tmp_path),
+        config={},
+        target_name="wheel",
+        app=app,
+        metadata=SimpleNamespace(core=SimpleNamespace(name=""), name=""),
+    )
+    MojoBuildHook.initialize(cast("Any", fake_empty_meta), "standard", {})
+
+    assert seen_dists == ["fallback-dist", None]
+    assert any("blocked" in w for w in warnings)
+    assert any("err:single_fail" in w for w in warnings)
+    assert any("ok:single_ok" in d for d in debugs)

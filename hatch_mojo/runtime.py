@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import os
+import posixpath
 import re
 import shutil
 import stat
 import subprocess
 import sys
-from pathlib import Path
+import tempfile
+from pathlib import Path, PurePosixPath
 
-from hatch_mojo.types import BuildJob
+from hatch_mojo.artifacts import resolve_install_target
+from hatch_mojo.types import BuildJob, RuntimeBundleResult
 
 
 def _lib_filename(base: str) -> str:
@@ -26,102 +30,226 @@ def _sentinel() -> str:
     return _lib_filename("KGENCompilerRTShared")
 
 
+_SDK_LIB_PACKAGES: tuple[str, ...] = ("modular", "mojo", "mojo_compiler", "max")
+_SDK_SPEC_PACKAGES: tuple[str, ...] = ("mojo", "mojo_compiler", "max", "modular")
+_VENV_SITE_PATTERNS: tuple[str, ...] = (
+    "lib/python*/site-packages",
+    "lib64/python*/site-packages",
+    "lib/python*/dist-packages",
+    "Lib/site-packages",
+)
+
+
+def _has_sentinel(candidate: Path) -> bool:
+    """Return True when *candidate* contains the Mojo runtime sentinel library."""
+    return (candidate / _sentinel()).exists()
+
+
+def _discover_from_mojo_bin(mojo_bin: str) -> Path | None:
+    """Locate runtime libraries co-located with or inside the venv of *mojo_bin*."""
+    resolved = mojo_bin
+    if not Path(mojo_bin).exists():
+        which_match = shutil.which(mojo_bin)
+        if which_match:
+            resolved = which_match
+
+    cursor = Path(resolved).resolve().parent
+    for _ in range(6):
+        direct_lib = cursor / "lib"
+        if _has_sentinel(direct_lib):
+            return direct_lib
+
+        for pkg in _SDK_LIB_PACKAGES:
+            sibling_lib = cursor / pkg / "lib"
+            if _has_sentinel(sibling_lib):
+                return sibling_lib
+
+        for pattern in _VENV_SITE_PATTERNS:
+            for site_dir in sorted(cursor.glob(pattern)):
+                for pkg in _SDK_LIB_PACKAGES:
+                    venv_lib = site_dir / pkg / "lib"
+                    if _has_sentinel(venv_lib):
+                        return venv_lib
+
+        if cursor.parent == cursor:
+            break
+        cursor = cursor.parent
+    return None
+
+
+def _discover_from_package_specs() -> Path | None:
+    """Locate runtime libraries from installed ``mojo`` / ``mojo-compiler`` / ``max`` packages."""
+    try:
+        pkg_root_mod = importlib.import_module("mojo._package_root")
+        pkg_root = pkg_root_mod.get_package_root()
+    except (ImportError, AttributeError, RuntimeError, OSError):
+        pkg_root = None
+
+    if pkg_root:
+        pkg_lib = Path(pkg_root) / "lib"
+        if _has_sentinel(pkg_lib):
+            return pkg_lib
+
+    for spec_name in _SDK_SPEC_PACKAGES:
+        try:
+            spec = importlib.util.find_spec(spec_name)
+        except (ImportError, ValueError, AttributeError):
+            spec = None
+        if not spec:
+            continue
+
+        package_dirs: list[Path] = []
+        if spec.origin:
+            package_dirs.append(Path(spec.origin).parent)
+        if spec.submodule_search_locations:
+            package_dirs.extend(Path(loc) for loc in spec.submodule_search_locations)
+
+        for pkg_dir in package_dirs:
+            direct = pkg_dir / "lib"
+            if _has_sentinel(direct):
+                return direct
+            site_packages = pkg_dir.parent
+            for sibling in _SDK_LIB_PACKAGES:
+                sibling_lib = site_packages / sibling / "lib"
+                if _has_sentinel(sibling_lib):
+                    return sibling_lib
+
+    return None
+
+
 def discover_modular_lib(root: Path, mojo_bin: str | None) -> Path:
-    """Find the ``modular/lib/`` directory containing Mojo runtime libraries.
+    """Locate the directory containing ``libKGENCompilerRTShared`` in compiler-matched order.
 
     Search order:
-    1. ``MODULAR_LIB_DIR`` environment variable
-    2. ``importlib.util.find_spec("modular")``
-    3. Walk up from the mojo binary
-    4. Well-known cibuildwheel container paths
+    1. ``MODULAR_LIB_DIR`` environment variable.
+    2. Ancestor and ``site-packages`` layout relative to *mojo_bin* when provided.
+    3. ``mojo._package_root`` and ``importlib.util.find_spec`` across PyPI SDK packages.
+    4. ``CONDA_PREFIX``, ``/opt/modular/lib``, ``.pixi/envs/default/lib``, and ``.modular/lib``.
     """
     env_dir = os.environ.get("MODULAR_LIB_DIR")
     if env_dir:
-        path = Path(env_dir)
-        if (path / _sentinel()).exists():
-            return path
+        env_path = Path(env_dir)
+        if _has_sentinel(env_path):
+            return env_path
 
-    spec = importlib.util.find_spec("modular")
-    if spec:
-        if spec.origin:
-            candidate = Path(spec.origin).parent / "lib"
-            if (candidate / _sentinel()).exists():
-                return candidate
-        if spec.submodule_search_locations:
-            for loc in spec.submodule_search_locations:
-                candidate = Path(loc) / "lib"
-                if (candidate / _sentinel()).exists():
-                    return candidate
+    if mojo_bin is not None:
+        from_bin = _discover_from_mojo_bin(mojo_bin)
+        if from_bin is not None:
+            return from_bin
 
-    if mojo_bin:
-        cursor = Path(mojo_bin).resolve().parent
-        for _ in range(5):
-            candidate = cursor / "lib"
-            if (candidate / _sentinel()).exists():
-                return candidate
-            if cursor.parent == cursor:
-                break
-            cursor = cursor.parent
+    from_specs = _discover_from_package_specs()
+    if from_specs is not None:
+        return from_specs
 
-    for container_path in (
-        Path("/opt/modular/lib"),
-        root / ".modular" / "lib",
-    ):
-        if (container_path / _sentinel()).exists():
-            return container_path
+    fallback_paths: list[Path] = []
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        fallback_paths.append(Path(conda_prefix) / "lib")
+    fallback_paths.extend(
+        (
+            Path("/opt/modular/lib"),
+            root / ".pixi" / "envs" / "default" / "lib",
+            root / ".modular" / "lib",
+        )
+    )
+    for candidate in fallback_paths:
+        if _has_sentinel(candidate):
+            return candidate
 
     msg = (
-        "Could not locate Mojo runtime libraries (modular/lib). "
-        "Set MODULAR_LIB_DIR or ensure the modular package is importable."
+        "Could not locate Mojo runtime libraries (libKGENCompilerRTShared). "
+        "Add 'mojo-compiler>=1.2.0' to build-system.requires or set MODULAR_LIB_DIR."
     )
     raise FileNotFoundError(msg)
 
 
 _MOJO_RUNTIME_NOTICE = """\
-This directory contains Mojo runtime libraries bundled from the Modular SDK.
+This directory contains Mojo runtime libraries bundled from the Mojo / Modular SDK.
 
 Bundled libraries:
 {lib_list}
 
-These libraries are copyright Modular Inc. and are distributed under the
-Modular Community License. The full license text is available at:
+Copyright (c) Modular Inc, a Qualcomm Company.
+Mojo runtime libraries are licensed under the Apache License 2.0 with LLVM Exceptions
+(SPDX: Apache-2.0 WITH LLVM-exception):
 
-    https://modular.com/legal/max-mojo-license
-
-By using this software you agree to the terms of the Modular Community License.
+    https://github.com/modular/modular/blob/main/LICENSE
 """
+
+_MAX_RUNTIME_NOTICE_ADDENDUM = """
+Bundled MAX libraries in this directory are governed by the MAX License:
+
+    https://www.modular.com/legal/max-license
+
+Under Section 1.5 of the MAX License, Apache-2.0 WITH LLVM-exception terms continue
+to govern all Apache-licensed Mojo runtime components.
+"""
+
+_DIST_INFO_LICENSE_PATTERNS: tuple[str, ...] = (
+    "mojo*.dist-info/licenses/LICENSE*",
+    "mojo*.dist-info/LICENSE*",
+    "modular*.dist-info/licenses/LICENSE*",
+    "modular*.dist-info/LICENSE*",
+    "max*.dist-info/licenses/LICENSE*",
+    "max*.dist-info/LICENSE*",
+)
+
+
+def _has_max_libraries(lib_filenames: list[str]) -> bool:
+    """Return True when *lib_filenames* includes MAX engine or kernel libraries."""
+    return any(name.startswith(("libMAX", "libMOGG")) for name in lib_filenames)
+
+
+def _find_sdk_license(modular_lib: Path) -> Path | None:
+    """Locate the SDK ``LICENSE`` file from *modular_lib* or sibling ``.dist-info`` metadata."""
+    direct_license = modular_lib.parent / "LICENSE"
+    if direct_license.is_file():
+        return direct_license
+
+    site_root = modular_lib.parent.parent
+    if site_root.is_dir():
+        for pattern in _DIST_INFO_LICENSE_PATTERNS:
+            for candidate in sorted(site_root.glob(pattern)):
+                if candidate.is_file():
+                    return candidate
+    return None
 
 
 def _write_license_notice(
     libs_dir: Path,
     lib_filenames: list[str],
     modular_lib: Path,
+    *,
+    wheel_dir: str | None = None,
 ) -> list[tuple[str, str]]:
-    """Write license notices for bundled Mojo runtime libraries.
+    """Write ``NOTICE.mojo-runtime`` and copy ``LICENSE.mojo-runtime`` when available.
 
-    Returns a list of (abs_path, wheel_relative_path) entries for force_include.
+    Returns ``(abs_path, archive_relative_path)`` pairs suitable for wheel inclusion.
     """
-    pkg_libs = libs_dir.name  # e.g. "mogemma.libs"
+    rel_dir = wheel_dir if wheel_dir is not None else libs_dir.name
     entries: list[tuple[str, str]] = []
 
-    # Generate notice file
     lib_list = "\n".join(f"  - {f}" for f in sorted(lib_filenames))
+    notice_body = _MOJO_RUNTIME_NOTICE.format(lib_list=lib_list)
+    if _has_max_libraries(lib_filenames):
+        notice_body = f"{notice_body}{_MAX_RUNTIME_NOTICE_ADDENDUM}"
     notice = libs_dir / "NOTICE.mojo-runtime"
-    notice.write_text(_MOJO_RUNTIME_NOTICE.format(lib_list=lib_list))
-    entries.append((str(notice), f"{pkg_libs}/NOTICE.mojo-runtime"))
+    notice.write_text(notice_body, encoding="utf-8")
+    entries.append((str(notice), f"{rel_dir}/NOTICE.mojo-runtime"))
 
-    # Copy SDK LICENSE if present
-    sdk_license = modular_lib.parent / "LICENSE"
-    if sdk_license.is_file():
+    sdk_license = _find_sdk_license(modular_lib)
+    if sdk_license is not None:
         dest = libs_dir / "LICENSE.mojo-runtime"
         shutil.copy2(sdk_license, dest)
-        entries.append((str(dest), f"{pkg_libs}/LICENSE.mojo-runtime"))
+        dest.chmod(dest.stat().st_mode | stat.S_IWUSR)
+        entries.append((str(dest), f"{rel_dir}/LICENSE.mojo-runtime"))
 
     return entries
 
 
 _OTOOL_LIB_RE: re.Pattern[str] = re.compile(r"^\s+(.+?)\s+\(compatibility version")
 _LDD_LIB_RE: re.Pattern[str] = re.compile(r"^\s*(.+?)\s+=>\s+(.+?)\s+\(0x[0-9a-f]+\)")
+_LDD_NOT_FOUND_RE: re.Pattern[str] = re.compile(r"^\s*(.+?)\s+=>\s+not found\b")
 _LDD_LIB_ABS_RE: re.Pattern[str] = re.compile(r"^\s*(/.+?)\s+\(0x[0-9a-f]+\)")
 
 
@@ -144,19 +272,22 @@ def _get_linked_libraries(target: Path) -> list[str]:
     libs: list[str] = []
 
     if is_mac:
-        for line in result.stdout.splitlines()[1:]:  # skip first line (binary name)
+        for line in result.stdout.splitlines()[1:]:
             m = _OTOOL_LIB_RE.match(line)
             if m:
                 libs.append(m.group(1))
     else:
         for line in result.stdout.splitlines():
-            # Match entries like: libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x...)
             m = _LDD_LIB_RE.match(line)
             if m:
                 libs.append(m.group(2))
                 continue
 
-            # Match absolute entries like: /lib64/ld-linux-x86-64.so.2 (0x...)
+            m_nf = _LDD_NOT_FOUND_RE.match(line)
+            if m_nf:
+                libs.append(m_nf.group(1))
+                continue
+
             m_abs = _LDD_LIB_ABS_RE.match(line)
             if m_abs:
                 libs.append(m_abs.group(1))
@@ -165,7 +296,10 @@ def _get_linked_libraries(target: Path) -> list[str]:
 
 
 def _resolve_modular_dependencies(entry_point: Path, modular_lib: Path) -> set[str]:
-    """Recursively find all Modular runtime dependencies for an entry point."""
+    """Recursively find all Modular runtime dependencies for *entry_point*.
+
+    Standard system libraries are excluded by retaining only filenames present in *modular_lib*.
+    """
     seen: set[str] = set()
     queue: list[Path] = [entry_point]
 
@@ -177,8 +311,6 @@ def _resolve_modular_dependencies(entry_point: Path, modular_lib: Path) -> set[s
             lib_path = Path(lib_path_str)
             filename = lib_path.name
 
-            # Exclude standard system libraries by only keeping those
-            # that exist inside the modular_lib directory.
             if filename not in seen:
                 candidate_path = modular_lib / filename
                 if candidate_path.exists():
@@ -206,12 +338,12 @@ def _run_install_name_tool(args: list[str], ignore_errors: list[str] | None = No
 
 
 def _strip_absolute_rpaths(target: Path) -> None:
-    """Remove absolute RPATHs from a Mach-O binary.
+    """Remove absolute ``LC_RPATH`` entries from a Mach-O binary.
 
-    Bundled dylibs may carry residual RPATHs from the SDK build environment
-    (e.g. ``/opt/modular/lib``).  Stripping them prevents the dynamic linker
-    from accidentally loading a different version from the SDK on developer
-    machines.
+    Bundled dylibs and extensions may carry residual RPATHs from the SDK build
+    environment (e.g. ``/opt/modular/lib``). Stripping them prevents the dynamic
+    linker from accidentally loading a different version from the SDK on
+    developer machines.
     """
     result = subprocess.run(
         ["otool", "-l", str(target)],  # noqa: S607
@@ -219,9 +351,17 @@ def _strip_absolute_rpaths(target: Path) -> None:
         capture_output=True,
         text=True,
     )
+    in_lc_rpath = False
     for line in result.stdout.splitlines():
-        if "path " in line:
-            rpath = line.split("path ")[1].split(" (offset")[0].strip()
+        stripped = line.strip()
+        if stripped == "cmd LC_RPATH":
+            in_lc_rpath = True
+            continue
+        if stripped.startswith("Load command ") or (stripped.startswith("cmd ") and stripped != "cmd LC_RPATH"):
+            in_lc_rpath = False
+            continue
+        if in_lc_rpath and stripped.startswith("path "):
+            rpath = stripped.split("path ", 1)[1].split(" (offset", 1)[0].strip()
             if rpath and not rpath.startswith("@"):
                 _run_install_name_tool(
                     ["-delete_rpath", rpath, str(target)],
@@ -254,11 +394,8 @@ def _patch_macos_dylibs(libs_dir: Path, lib_filenames: list[str]) -> None:
     """
     for filename in lib_filenames:
         target = libs_dir / filename
-        # Strip residual absolute RPATHs from SDK build environment
         _strip_absolute_rpaths(target)
-        # Change own identity
         _run_install_name_tool(["-id", f"@rpath/{filename}", str(target)])
-        # Rewrite sibling references
         linked = _get_linked_libraries(target)
         for ref in linked:
             if ref.startswith(("@rpath/", "@loader_path/")):
@@ -271,8 +408,17 @@ def _patch_macos_dylibs(libs_dir: Path, lib_filenames: list[str]) -> None:
         _resign_ad_hoc(target)
 
 
-def _patch_macos_extension(ext: Path, lib_filenames: list[str], rpaths: list[str]) -> None:
-    """Rewrite an extension's references to bundled dylibs and add RPATHs."""
+def _patch_macos_extension(
+    ext: Path,
+    lib_filenames: list[str],
+    rpaths: list[str],
+    *,
+    set_install_id: bool = False,
+) -> None:
+    """Strip residual SDK RPATHs, rewrite bundled dylib references, add RPATHs, and re-sign."""
+    _strip_absolute_rpaths(ext)
+    if set_install_id:
+        _run_install_name_tool(["-id", f"@rpath/{ext.name}", str(ext)])
     linked = _get_linked_libraries(ext)
     for ref in linked:
         if ref.startswith(("@rpath/", "@loader_path/")):
@@ -290,17 +436,23 @@ def _patch_macos_extension(ext: Path, lib_filenames: list[str], rpaths: list[str
     _resign_ad_hoc(ext)
 
 
+def _compute_relative_rpath(depth: int, libs_rel_path: str) -> list[str]:
+    """Compute origin-relative RPATH entries for an artifact at *depth*."""
+    origin = "@loader_path" if sys.platform == "darwin" else "$ORIGIN"
+    rel = libs_rel_path.lstrip("/")
+    if depth <= 0:
+        return [origin, f"{origin}/{rel}"]
+    up = "/".join(".." for _ in range(depth))
+    return [origin, f"{origin}/{up}/{rel}"]
+
+
 def _compute_extension_rpath(module: str, pkg_name: str) -> list[str]:
     """Compute the RPATHs for a python-extension based on its module depth.
 
     ``mogemma._core`` (depth 1) → ``[$ORIGIN, $ORIGIN/../mogemma.libs]``
     ``pkg.sub._core`` (depth 2) → ``[$ORIGIN, $ORIGIN/../../pkg.libs]``
     """
-    origin = "@loader_path" if sys.platform == "darwin" else "$ORIGIN"
-    parts = module.split(".")
-    depth = len(parts) - 1
-    up = "/".join(".." for _ in range(depth))
-    return [origin, f"{origin}/{up}/{pkg_name}.libs"]
+    return _compute_relative_rpath(len(module.split(".")) - 1, f"{pkg_name}.libs")
 
 
 def _patch_rpath(target: Path, rpaths: list[str]) -> None:
@@ -313,6 +465,7 @@ def _patch_rpath(target: Path, rpaths: list[str]) -> None:
                 ["-add_rpath", rpath, str(target)],
                 ignore_errors=["already contains LC_RPATH"],
             )
+        _resign_ad_hoc(target)
     else:
         subprocess.run(
             ["patchelf", "--set-rpath", ":".join(rpaths), str(target)],  # noqa: S607
@@ -321,77 +474,185 @@ def _patch_rpath(target: Path, rpaths: list[str]) -> None:
         )
 
 
+def _normalize_dist_pkg(dist_name: str | None) -> str:
+    """Normalize *dist_name* to a safe ``<pkg>.libs`` prefix."""
+    cleaned = re.sub(r"[-_.]+", "_", (dist_name or "").lower()).strip("_")
+    return cleaned or "mojo_runtime"
+
+
+def _classify_bundle_job(job: BuildJob, dist_name: str | None) -> tuple[str, str, list[str]] | None:
+    """Classify *job* into ``(scheme, libs_pkg, rpath)`` when dynamically linkable."""
+    if job.emit == "python-extension":
+        if not job.module:
+            return None
+        libs_pkg = job.module.split(".")[0]
+        return ("platlib", libs_pkg, _compute_extension_rpath(job.module, libs_pkg))
+
+    if job.emit not in {"shared-lib", "executable"} or not job.install_kind:
+        return None
+
+    parts = PurePosixPath(posixpath.normpath(resolve_install_target(job))).parts
+    if job.install_kind in {"scripts", "data"}:
+        libs_pkg = _normalize_dist_pkg(dist_name)
+        depth = len(parts) if job.install_kind == "scripts" else len(parts) - 1
+        return ("data", libs_pkg, _compute_relative_rpath(depth, f"lib/{libs_pkg}.libs"))
+
+    libs_pkg = parts[0] if job.install_kind == "package" else _normalize_dist_pkg(dist_name)
+    depth = len(parts) - 1
+    return ("platlib", libs_pkg, _compute_relative_rpath(depth, f"{libs_pkg}.libs"))
+
+
+def _stage_bundle_group(
+    libs_dir: Path,
+    wheel_dir: str,
+    group_jobs: list[tuple[BuildJob, list[str]]],
+    modular_lib: Path,
+) -> tuple[dict[str, str], list[Path]]:
+    """Stage runtime libraries, license notices, and RPATH patches for a bundle group."""
+    libs_dir.mkdir(parents=True, exist_ok=True)
+
+    required_libs: set[str] = set()
+    for job, _ in group_jobs:
+        required_libs.update(_resolve_modular_dependencies(job.output_path, modular_lib))
+
+    sentinel_name = _sentinel()
+    if sentinel_name not in required_libs and (modular_lib / sentinel_name).exists():
+        required_libs.update(_resolve_modular_dependencies(modular_lib / sentinel_name, modular_lib))
+        required_libs.add(sentinel_name)
+
+    mapping: dict[str, str] = {}
+    staged: list[Path] = []
+    lib_filenames: list[str] = sorted(required_libs)
+    for filename in lib_filenames:
+        src = modular_lib / filename
+        if not src.exists():
+            msg = f"Missing required Mojo runtime library: {src}"
+            raise FileNotFoundError(msg)
+        dest = libs_dir / filename
+        shutil.copy2(src, dest)
+        dest.chmod(dest.stat().st_mode | stat.S_IWUSR)
+        mapping[str(dest)] = f"{wheel_dir}/{filename}"
+        staged.append(dest)
+
+    notice_entries = _write_license_notice(libs_dir, lib_filenames, modular_lib, wheel_dir=wheel_dir)
+    for abs_str, rel_target in notice_entries:
+        mapping[abs_str] = rel_target
+        staged.append(Path(abs_str))
+
+    if sys.platform == "darwin":
+        _patch_macos_dylibs(libs_dir, lib_filenames)
+        for job, rpath in group_jobs:
+            _patch_macos_extension(
+                job.output_path,
+                lib_filenames,
+                rpath,
+                set_install_id=(job.emit == "shared-lib"),
+            )
+    else:
+        for filename in lib_filenames:
+            _patch_rpath(libs_dir / filename, ["$ORIGIN"])
+        for job, rpath in group_jobs:
+            _patch_rpath(job.output_path, rpath)
+
+    return mapping, staged
+
+
 def bundle_runtime_libs(
     root: Path,
     build_dir: str,
     jobs: list[BuildJob],
     mojo_bin: str | None,
-) -> dict[str, str]:
-    """Bundle Mojo runtime libs alongside python-extension outputs.
-
-    Returns a mapping of ``{staging_path: wheel_relative_path}`` suitable
-    for merging into Hatch ``force_include``.
-    """
+    *,
+    dist_name: str | None = None,
+) -> RuntimeBundleResult:
+    """Bundle Mojo runtime libraries for linkable extension, shared-lib, and executable jobs."""
     if sys.platform == "win32":
-        return {}
+        return RuntimeBundleResult(force_include={}, shared_data={}, staged_files=())
 
-    ext_jobs = [j for j in jobs if j.emit == "python-extension" and j.module]
-    if not ext_jobs:
-        return {}
+    platlib_groups: dict[str, list[tuple[BuildJob, list[str]]]] = {}
+    data_groups: dict[str, list[tuple[BuildJob, list[str]]]] = {}
+    for job in jobs:
+        classified = _classify_bundle_job(job, dist_name)
+        if classified is None:
+            continue
+        scheme, libs_pkg, rpath = classified
+        target_groups = data_groups if scheme == "data" else platlib_groups
+        target_groups.setdefault(libs_pkg, []).append((job, rpath))
+
+    if not platlib_groups and not data_groups:
+        return RuntimeBundleResult(force_include={}, shared_data={}, staged_files=())
 
     modular_lib = discover_modular_lib(root, mojo_bin)
-
-    # Group extension jobs by top-level package
-    packages: dict[str, list[BuildJob]] = {}
-    for job in ext_jobs:
-        pkg = job.module.split(".")[0]  # type: ignore[union-attr]
-        packages.setdefault(pkg, []).append(job)
-
-    force_include: dict[str, str] = {}
     abs_build = root / build_dir
+    force_include: dict[str, str] = {}
+    shared_data: dict[str, str] = {}
+    staged_files: list[Path] = []
 
-    for pkg_name, pkg_jobs in packages.items():
+    for pkg_name, pkg_jobs in platlib_groups.items():
         libs_dir = abs_build / f"{pkg_name}.libs"
-        libs_dir.mkdir(parents=True, exist_ok=True)
+        group_map, group_staged = _stage_bundle_group(libs_dir, f"{pkg_name}.libs", pkg_jobs, modular_lib)
+        force_include.update(group_map)
+        staged_files.extend(group_staged)
 
-        # Resolve required libs across all jobs in the package
-        required_libs: set[str] = set()
-        for job in pkg_jobs:
-            required_libs.update(_resolve_modular_dependencies(job.output_path, modular_lib))
+    for pkg_name, pkg_jobs in data_groups.items():
+        libs_dir = abs_build / "shared" / f"{pkg_name}.libs"
+        group_map, group_staged = _stage_bundle_group(libs_dir, f"lib/{pkg_name}.libs", pkg_jobs, modular_lib)
+        shared_data.update(group_map)
+        staged_files.extend(group_staged)
 
-        # Ensure sentinel is always included as it implies the root modular directory
-        sentinel_name = _sentinel()
-        if sentinel_name not in required_libs and (modular_lib / sentinel_name).exists():
-            required_libs.update(_resolve_modular_dependencies(modular_lib / sentinel_name, modular_lib))
-            required_libs.add(sentinel_name)
+    return RuntimeBundleResult(
+        force_include=force_include,
+        shared_data=shared_data,
+        staged_files=tuple(staged_files),
+    )
 
-        # Copy all resolved runtime libs
-        lib_filenames: list[str] = sorted(required_libs)
-        for filename in lib_filenames:
-            src = modular_lib / filename
-            if not src.exists():
-                msg = f"Missing required Mojo runtime library: {src}"
-                raise FileNotFoundError(msg)
-            dest = libs_dir / filename
-            shutil.copy2(src, dest)
-            dest.chmod(dest.stat().st_mode | stat.S_IWUSR)
-            force_include[str(dest)] = f"{pkg_name}.libs/{filename}"
 
-        # Add license notice for bundled libraries
-        force_include.update(_write_license_notice(libs_dir, lib_filenames, modular_lib))
+def _is_ephemeral_sdk(modular_lib: Path, root: Path) -> bool:
+    """Return True when *modular_lib* resides inside an ephemeral PEP 517 build directory."""
+    resolved = modular_lib.resolve()
+    if resolved.is_relative_to(root.resolve()):
+        return False
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    if resolved.is_relative_to(temp_root):
+        return True
+    return any(
+        part == "builds-v0" or part.startswith((".tmp", "pip-build-env-", "build-env-")) for part in resolved.parts
+    )
 
-        if sys.platform == "darwin":
-            # Rewrite dylib install names and inter-library references
-            _patch_macos_dylibs(libs_dir, lib_filenames)
-            for job in pkg_jobs:
-                rpath = _compute_extension_rpath(job.module, pkg_name)  # type: ignore[arg-type]
-                _patch_macos_extension(job.output_path, lib_filenames, rpath)
-        else:
-            # Linux: set RPATH on each copied lib and extension
-            for filename in lib_filenames:
-                _patch_rpath(libs_dir / filename, ["$ORIGIN"])
-            for job in pkg_jobs:
-                rpath = _compute_extension_rpath(job.module, pkg_name)  # type: ignore[arg-type]
-                _patch_rpath(job.output_path, rpath)
 
-    return force_include
+def patch_editable_runtime(
+    root: Path,
+    build_dir: str,
+    jobs: list[BuildJob],
+    mojo_bin: str | None,
+) -> tuple[Path, ...]:
+    """Patch editable binaries to resolve Mojo runtime libraries from persistent or staged SDK dirs."""
+    if sys.platform == "win32":
+        return ()
+
+    linkable = [job for job in jobs if job.emit in {"python-extension", "shared-lib", "executable"}]
+    if not linkable:
+        return ()
+
+    modular_lib = discover_modular_lib(root, mojo_bin)
+    if _is_ephemeral_sdk(modular_lib, root):
+        libs_dir = root / build_dir / "editable.libs"
+        target_rpaths = [str(libs_dir.resolve())]
+        group_jobs = [(job, target_rpaths) for job in linkable]
+        _, staged = _stage_bundle_group(libs_dir, "editable.libs", group_jobs, modular_lib)
+        return tuple(staged)
+
+    target_rpaths = [str(modular_lib.resolve())]
+    if sys.platform == "darwin":
+        sdk_libs = sorted(entry.name for entry in modular_lib.iterdir() if entry.is_file())
+        for job in linkable:
+            _patch_macos_extension(
+                job.output_path,
+                sdk_libs,
+                target_rpaths,
+                set_install_id=(job.emit == "shared-lib"),
+            )
+    else:
+        for job in linkable:
+            _patch_rpath(job.output_path, target_rpaths)
+    return ()

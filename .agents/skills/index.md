@@ -1,0 +1,8 @@
+# Project-Local Skills and Paired Subagents
+
+Routing table for `hatch-mojo` engineering skills, zero-context review capability skills, paired subagents, and OKF knowledge chapters.
+
+| Domain | Rule Prefix | Engineering Skill | Review Skill | Reviewer Subagent | Specialist Subagent | Knowledge Chapters |
+| --- | --- | --- | --- | --- | --- | --- |
+| Hatch Build Pipeline | `HBP` | [hatch-build-pipeline](hatch-build-pipeline/SKILL.md) | [review-hatch-build-pipeline](review-hatch-build-pipeline/SKILL.md) | [hatch-build-pipeline-reviewer](../agents/hatch-build-pipeline-reviewer.md) | [hatch-build-pipeline-specialist](../agents/hatch-build-pipeline-specialist.md) | [build-pipeline-seams.md](../bundles/knowledge/architecture/build-pipeline-seams.md), [mojo-wheel-packaging.md](../bundles/knowledge/domains/mojo-wheel-packaging.md), [typed-slotted-models.md](../bundles/knowledge/patterns/typed-slotted-models.md), [public-seam-verification.md](../bundles/knowledge/testing/public-seam-verification.md) |
+| Native Runtime Bundling | `NRB` | [native-runtime-bundling](native-runtime-bundling/SKILL.md) | [review-native-runtime-bundling](review-native-runtime-bundling/SKILL.md) | [native-runtime-bundling-reviewer](../agents/native-runtime-bundling-reviewer.md) | [native-runtime-bundling-specialist](../agents/native-runtime-bundling-specialist.md) | [idempotent-binary-patching.md](../bundles/knowledge/patterns/idempotent-binary-patching.md), [platform-linking-and-build-quirks.md](../bundles/knowledge/gotchas/platform-linking-and-build-quirks.md), [adr-001](../bundles/knowledge/decisions/adr-001-dynamic-runtime-dependency-resolution.md), [adr-002](../bundles/knowledge/decisions/adr-002-idempotent-macho-rpath-patching.md) |

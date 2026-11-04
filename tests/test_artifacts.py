@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from packaging.tags import Tag
 
-from hatch_mojo.artifacts import register_artifacts
+from hatch_mojo.artifacts import register_artifacts, resolve_host_platform_tag, resolve_install_target
 from hatch_mojo.types import BuildJob
 
 
@@ -57,7 +59,7 @@ def test_register_python_extension_requires_module(tmp_path: Path) -> None:
 def test_register_non_python_variants(tmp_path: Path) -> None:
     build_data: dict[str, object] = {}
     bin_a = tmp_path / "a.so"
-    bin_b = tmp_path / "b.a"
+    bin_b = tmp_path / "b.mojoc"
     bin_c = tmp_path / "c"
     bin_d = tmp_path / "d.bin"
     for item in (bin_a, bin_b, bin_c, bin_d):
@@ -65,20 +67,110 @@ def test_register_non_python_variants(tmp_path: Path) -> None:
 
     jobs = [
         BuildJob("a", tmp_path / "a.mojo", bin_a, "shared-lib", None, "package", "mypkg", (), (), (), {}, ()),
-        BuildJob("b", tmp_path / "b.mojo", bin_b, "static-lib", None, "root", "ignored", (), (), (), {}, ()),
+        BuildJob("b", tmp_path / "b.mojo", bin_b, "mojoc", None, "root", "ignored", (), (), (), {}, ()),
         BuildJob("c", tmp_path / "c.mojo", bin_c, "executable", None, "force-include", "bin/tool", (), (), (), {}, ()),
         BuildJob("d", tmp_path / "d.mojo", bin_d, "object", None, "data", "share", (), (), (), {}, ()),
     ]
     register_artifacts(root=tmp_path, build_data=build_data, jobs=jobs, target_name="wheel")
     force_include = build_data["force_include"]
-    artifacts = build_data["artifacts"]
+    shared_data = build_data["shared_data"]
     assert isinstance(force_include, dict)
-    assert isinstance(artifacts, list)
+    assert isinstance(shared_data, dict)
     assert force_include[str(bin_a)] == "mypkg/a.so"
-    assert force_include[str(bin_b)] == "b.a"
+    assert force_include[str(bin_b)] == "b.mojoc"
     assert force_include[str(bin_c)] == "bin/tool"
-    assert force_include[str(bin_d)] == "share/d.bin"
-    assert "d.bin" in artifacts[0]
+    assert str(bin_d) not in force_include
+    assert shared_data[str(bin_d)] == "share/d.bin"
+
+
+def test_register_scripts_and_data_use_shared_maps(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    external_dir = tmp_path / "external_build"
+    external_dir.mkdir()
+
+    cli_exact = external_dir / "cli_bin"
+    cli_sub = external_dir / "my-cli"
+    data_dir_item = external_dir / "d.bin"
+    data_exact_item = external_dir / "raw.bin"
+    fi_dir_item = external_dir / "lib.so"
+    fi_exact_item = external_dir / "exact.so"
+    root_item = external_dir / "top.mojoc"
+    for item in (cli_exact, cli_sub, data_dir_item, data_exact_item, fi_dir_item, fi_exact_item, root_item):
+        item.write_bytes(b"x")
+
+    jobs = [
+        BuildJob("cli1", root / "a.mojo", cli_exact, "executable", None, "scripts", "my-cli", (), (), (), {}, ()),
+        BuildJob("cli2", root / "b.mojo", cli_sub, "executable", None, "scripts", "sub/", (), (), (), {}, ()),
+        BuildJob("dat1", root / "c.mojo", data_dir_item, "object", None, "data", "share", (), (), (), {}, ()),
+        BuildJob(
+            "dat2", root / "d.mojo", data_exact_item, "object", None, "data", "share/custom.dat", (), (), (), {}, ()
+        ),
+        BuildJob("fi1", root / "e.mojo", fi_dir_item, "shared-lib", None, "force-include", "lib/", (), (), (), {}, ()),
+        BuildJob(
+            "fi2",
+            root / "f.mojo",
+            fi_exact_item,
+            "shared-lib",
+            None,
+            "force-include",
+            "custom/lib.so",
+            (),
+            (),
+            (),
+            {},
+            (),
+        ),
+        BuildJob("rt", root / "g.mojo", root_item, "mojoc", None, "root", None, (), (), (), {}, ()),
+    ]
+
+    assert [resolve_install_target(job) for job in jobs] == [
+        "my-cli",
+        "sub/my-cli",
+        "share/d.bin",
+        "share/custom.dat",
+        "lib/lib.so",
+        "custom/lib.so",
+        "top.mojoc",
+    ]
+
+    build_data: dict[str, object] = {}
+    register_artifacts(root=root, build_data=build_data, jobs=jobs, target_name="wheel")
+
+    force_include = cast("dict[str, str]", build_data["force_include"])
+    shared_scripts = cast("dict[str, str]", build_data["shared_scripts"])
+    shared_data = cast("dict[str, str]", build_data["shared_data"])
+
+    assert shared_scripts == {
+        str(cli_exact): "my-cli",
+        str(cli_sub): "sub/my-cli",
+    }
+    assert shared_data == {
+        str(data_dir_item): "share/d.bin",
+        str(data_exact_item): "share/custom.dat",
+    }
+    assert str(cli_exact) not in force_include
+    assert str(cli_sub) not in force_include
+    assert str(data_dir_item) not in force_include
+    assert str(data_exact_item) not in force_include
+    assert force_include[str(fi_dir_item)] == "lib/lib.so"
+    assert force_include[str(fi_exact_item)] == "custom/lib.so"
+    assert force_include[str(root_item)] == "top.mojoc"
+
+
+def test_register_mojoc_only_keeps_pure_python(tmp_path: Path) -> None:
+    build_data: dict[str, object] = {}
+    ir_file = tmp_path / "mod.mojoc"
+    obj_file = tmp_path / "mod.o"
+    ir_file.write_bytes(b"x")
+    obj_file.write_bytes(b"x")
+    jobs = [
+        BuildJob("ir", tmp_path / "mod.mojo", ir_file, "mojoc", None, "package", "mypkg", (), (), (), {}, ()),
+        BuildJob("obj", tmp_path / "mod.mojo", obj_file, "object", None, "package", "mypkg", (), (), (), {}, ()),
+    ]
+    register_artifacts(root=tmp_path, build_data=build_data, jobs=jobs, target_name="wheel")
+    assert "infer_tag" not in build_data
+    assert "pure_python" not in build_data
 
 
 def test_register_requires_install_for_non_python(tmp_path: Path) -> None:
@@ -121,3 +213,140 @@ def test_register_unknown_install_kind_raises(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="Unknown install kind"):
         register_artifacts(root=tmp_path, build_data=build_data, jobs=[job], target_name="wheel")
+
+
+def test_register_artifacts_wheel_tag_auto_extension_vs_standalone(tmp_path: Path) -> None:
+    plat = resolve_host_platform_tag()
+
+    ext_job = BuildJob(
+        "ext",
+        tmp_path / "ext.mojo",
+        tmp_path / "_ext.so",
+        "python-extension",
+        "pkg._ext",
+        None,
+        None,
+        (),
+        (),
+        (),
+        {},
+        (),
+    )
+    bd_ext: dict[str, Any] = {}
+    register_artifacts(root=tmp_path, build_data=bd_ext, jobs=[ext_job], target_name="wheel", wheel_tag="auto")
+    assert bd_ext["pure_python"] is False
+    assert bd_ext["infer_tag"] is True
+    assert "tag" not in bd_ext
+
+    cli_job = BuildJob(
+        "cli", tmp_path / "cli.mojo", tmp_path / "my-cli", "executable", None, "scripts", "my-cli", (), (), (), {}, ()
+    )
+    bd_cli: dict[str, Any] = {}
+    register_artifacts(root=tmp_path, build_data=bd_cli, jobs=[cli_job], target_name="wheel", wheel_tag="auto")
+    assert bd_cli["pure_python"] is False
+    assert bd_cli["infer_tag"] is False
+    assert bd_cli["tag"] == f"py3-none-{plat}"
+
+    ir_job = BuildJob(
+        "ir", tmp_path / "ir.mojo", tmp_path / "mod.mojoc", "mojoc", None, "package", "pkg", (), (), (), {}, ()
+    )
+    bd_ir: dict[str, Any] = {}
+    register_artifacts(root=tmp_path, build_data=bd_ir, jobs=[ir_job], target_name="wheel", wheel_tag="auto")
+    assert "pure_python" not in bd_ir
+    assert "infer_tag" not in bd_ir
+    assert "tag" not in bd_ir
+
+
+def test_register_artifacts_wheel_tag_py3_none_and_custom_and_darwin_compat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plat = resolve_host_platform_tag()
+    ext_job = BuildJob(
+        "ext",
+        tmp_path / "ext.mojo",
+        tmp_path / "_ext.so",
+        "python-extension",
+        "pkg._ext",
+        None,
+        None,
+        (),
+        (),
+        (),
+        {},
+        (),
+    )
+    bd_py3: dict[str, Any] = {}
+    register_artifacts(root=tmp_path, build_data=bd_py3, jobs=[ext_job], target_name="wheel", wheel_tag="py3-none")
+    assert bd_py3["pure_python"] is False
+    assert bd_py3["infer_tag"] is False
+    assert bd_py3["tag"] == f"py3-none-{plat}"
+
+    ir_job = BuildJob(
+        "ir", tmp_path / "ir.mojo", tmp_path / "mod.mojoc", "mojoc", None, "package", "pkg", (), (), (), {}, ()
+    )
+    bd_custom: dict[str, Any] = {}
+    register_artifacts(
+        root=tmp_path,
+        build_data=bd_custom,
+        jobs=[ir_job],
+        target_name="wheel",
+        wheel_tag="cp312-abi3-manylinux_2_34_x86_64",
+    )
+    assert "pure_python" not in bd_custom
+    assert bd_custom["infer_tag"] is False
+    assert bd_custom["tag"] == "cp312-abi3-manylinux_2_34_x86_64"
+
+    captured_compat: list[tuple[str, bool]] = []
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        "hatch_mojo.artifacts.sys_tags",
+        lambda: iter([Tag("cp312", "cp312", "macosx_14_0_arm64")]),
+    )
+
+    def _fake_process_macos(tag_plat: str, /, *, compat: bool = False) -> str:
+        captured_compat.append((tag_plat, compat))
+        return "macosx_11_0_arm64"
+
+    monkeypatch.setattr("hatch_mojo.artifacts.process_macos_plat_tag", _fake_process_macos)
+    assert resolve_host_platform_tag(macos_max_compat=True) == "macosx_11_0_arm64"
+    assert captured_compat == [("macosx_14_0_arm64", True)]
+
+
+def test_register_artifacts_missing_install_path_and_sdist_and_custom_native_tag(tmp_path: Path) -> None:
+    missing_path_job = BuildJob(
+        "lib", tmp_path / "lib.mojo", tmp_path / "lib.so", "shared-lib", None, "package", None, (), (), (), {}, ()
+    )
+    with pytest.raises(ValueError, match="missing install mapping"):
+        resolve_install_target(missing_path_job)
+
+    ext_job = BuildJob(
+        "ext",
+        tmp_path / "ext.mojo",
+        tmp_path / "_ext.so",
+        "python-extension",
+        "pkg._ext",
+        None,
+        None,
+        (),
+        (),
+        (),
+        {},
+        (),
+    )
+    sdist_bd: dict[str, Any] = {}
+    register_artifacts(root=tmp_path, build_data=sdist_bd, jobs=[ext_job], target_name="sdist")
+    assert "pure_python" not in sdist_bd
+    assert "infer_tag" not in sdist_bd
+
+    custom_native_bd: dict[str, Any] = {}
+    register_artifacts(
+        root=tmp_path,
+        build_data=custom_native_bd,
+        jobs=[ext_job],
+        target_name="wheel",
+        wheel_tag="cp312-abi3-manylinux_2_34_x86_64",
+    )
+    assert custom_native_bd["pure_python"] is False
+    assert custom_native_bd["infer_tag"] is False
+    assert custom_native_bd["tag"] == "cp312-abi3-manylinux_2_34_x86_64"

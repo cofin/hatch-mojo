@@ -1,0 +1,10 @@
+{
+  "setup_status": "complete",
+  "last_successful_step": "complete",
+  "root_directory": ".agents",
+  "bundle_root": ".agents/bundles",
+  "okf_version": "0.2",
+  "workflow_preferences": {
+    "ignore_policy": "shared"
+  }
+}

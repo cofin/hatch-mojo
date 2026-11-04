@@ -43,7 +43,6 @@ install-uv:                                         ## Install latest version of
 .PHONY: install
 install: destroy clean                              ## Install the project and all dependencies
 	@echo "${INFO} Starting fresh installation..."
-	@uv python pin 3.10 >/dev/null 2>&1
 	@uv venv >/dev/null 2>&1
 	@uv sync --all-extras --dev
 	@echo "${OK} Installation complete!"
@@ -96,7 +95,7 @@ release:                                            ## Bump version and create r
 .PHONY: clean
 clean:                                              ## Cleanup temporary build artifacts
 	@echo "${INFO} Cleaning working directory..."
-	@rm -rf .pytest_cache .ruff_cache .hypothesis build/ dist/ .eggs/ .coverage coverage.xml coverage.json htmlcov/ .mypy_cache .hatch_mojo >/dev/null 2>&1
+	@rm -rf .pytest_cache .ruff_cache .hypothesis build/ dist/ .eggs/ .coverage coverage.xml coverage.json htmlcov/ .mypy_cache >/dev/null 2>&1
 	@find . \( -path ./.venv -o -path ./.git \) -prune -o -name '*.egg-info' -exec rm -rf {} + >/dev/null 2>&1
 	@find . \( -path ./.venv -o -path ./.git \) -prune -o -type f -name '*.egg' -exec rm -f {} + >/dev/null 2>&1
 	@find . \( -path ./.venv -o -path ./.git \) -prune -o -name '*.pyc' -exec rm -f {} + >/dev/null 2>&1
