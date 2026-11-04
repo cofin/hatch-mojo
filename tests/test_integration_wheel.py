@@ -363,3 +363,28 @@ def test_wheel_build_py3_none_extension_and_auto_executable(tmp_path: Path) -> N
         cli_wheel_meta = zf.read("auto_cli_pkg-1.0.0.dist-info/WHEEL").decode("utf-8")
     assert "Root-Is-Purelib: false" in cli_wheel_meta
     assert "Tag: py3-none-" in cli_wheel_meta
+
+
+def test_hatch_mojo_self_wheel_pep639_metadata(tmp_path: Path) -> None:
+    repo_root = Path(__file__).parent.parent.absolute()
+    out_dir = tmp_path / "self_dist"
+    res = subprocess.run(
+        ["uv", "build", "--wheel", "--no-build-isolation", "--out-dir", str(out_dir)],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, f"STDOUT: {res.stdout}\nSTDERR: {res.stderr}"
+    wheels = list(out_dir.glob("hatch_mojo-*.whl"))
+    assert len(wheels) == 1
+    with zipfile.ZipFile(wheels[0], "r") as zf:
+        names = zf.namelist()
+        license_entries = [n for n in names if n.endswith(".dist-info/licenses/LICENSE")]
+        assert len(license_entries) == 1, f"Missing PEP 639 license file in {names}"
+        meta_entries = [n for n in names if n.endswith(".dist-info/METADATA")]
+        assert len(meta_entries) == 1
+        metadata_text = zf.read(meta_entries[0]).decode("utf-8")
+    assert "License-Expression: MIT" in metadata_text
+    assert "License :: OSI Approved ::" not in metadata_text
+    assert "Classifier: Programming Language :: Python :: 3.15" in metadata_text
