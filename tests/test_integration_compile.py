@@ -24,7 +24,7 @@ def test_compile_job_creates_output(tmp_path: Path) -> None:
     _write_fake_mojo(fake_mojo)
     source = tmp_path / "src/mo/pkg/core.mojo"
     source.parent.mkdir(parents=True, exist_ok=True)
-    source.write_text("fn main():\n    pass\n", encoding="utf-8")
+    source.write_text("def main():\n    pass\n", encoding="utf-8")
     output = tmp_path / "src/py/pkg/_core.so"
 
     job = BuildJob(

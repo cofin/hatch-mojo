@@ -29,8 +29,6 @@ def test_wheel_build_includes_native_extension(tmp_path: Path) -> None:
     _write_fake_mojo(fake_mojo)
 
     pyproject = project_dir / "pyproject.toml"
-
-    # Write the pyproject.toml
     content = textwrap.dedent(f"""
         [project]
         name = "my_pkg"
@@ -55,13 +53,20 @@ def test_wheel_build_includes_native_extension(tmp_path: Path) -> None:
 
     src_mo = project_dir / "src" / "mo" / "core.mojo"
     src_mo.parent.mkdir(parents=True, exist_ok=True)
-    src_mo.write_text("fn main(): pass", encoding="utf-8")
+    src_mo.write_text(
+        "from std.python import PythonObject\n"
+        "from std.python.bindings import PythonModuleBuilder\n\n"
+        "@export\n"
+        'def PyInit__core() abi("C") -> PythonObject:\n'
+        '    var b = PythonModuleBuilder("_core")\n'
+        "    return b.finalize()\n",
+        encoding="utf-8",
+    )
 
     src_py = project_dir / "src" / "my_pkg" / "__init__.py"
     src_py.parent.mkdir(parents=True, exist_ok=True)
     src_py.write_text("print('hello')", encoding="utf-8")
 
-    # Run uv build --wheel
     res = subprocess.run(
         ["uv", "build", "--wheel"],
         cwd=project_dir,
@@ -69,8 +74,6 @@ def test_wheel_build_includes_native_extension(tmp_path: Path) -> None:
         text=True,
         check=False,
     )
-
-    # We must ensure the command succeeded
     assert res.returncode == 0, f"uv build failed!\nSTDOUT: {res.stdout}\nSTDERR: {res.stderr}"
 
     dist_dir = project_dir / "dist"
@@ -78,21 +81,12 @@ def test_wheel_build_includes_native_extension(tmp_path: Path) -> None:
     assert len(wheels) == 1, f"Expected 1 wheel, found {len(wheels)}"
 
     wheel_path = wheels[0]
-
-    # Analyze the ZIP contents of the wheel
     with zipfile.ZipFile(wheel_path, "r") as zf:
         namelist = zf.namelist()
 
-    # Determine the expected suffix for the current platform
-    if sys.platform == "win32":
-        suffix = ".pyd"
-    else:
-        suffix = ".so"
-
+    suffix = ".pyd" if sys.platform == "win32" else ".so"
     expected_extension = f"my_pkg/_core{suffix}"
     assert expected_extension in namelist, (
         f"Native extension {expected_extension} not found in wheel! Contents: {namelist}"
     )
-
-    # Also verify that the standard __init__.py is included
     assert "my_pkg/__init__.py" in namelist
