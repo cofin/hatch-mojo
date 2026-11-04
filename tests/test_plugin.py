@@ -38,6 +38,7 @@ def _config(
     clean_before: bool = False,
     clean_after: bool = False,
     bundle_libs: bool = True,
+    cache: bool = True,
 ) -> Any:
     return SimpleNamespace(
         jobs=(object(),),
@@ -49,6 +50,7 @@ def _config(
         fail_fast=True,
         mojo_bin=None,
         bundle_libs=bundle_libs,
+        cache=cache,
     )
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ class HookConfig:
     clean_after_build: bool
     skip_editable: bool
     bundle_libs: bool
+    cache: bool
     build_dir: str
     include: tuple[str, ...]
     exclude: tuple[str, ...]
@@ -71,9 +73,46 @@ def _bool(value: Any, default: bool) -> bool:
     raise TypeError(msg)
 
 
-def _merge_dict(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+def _env_bool(env_name: str, raw_val: Any, default: bool) -> bool:
+    """Resolve a boolean setting with environment-variable override precedence."""
+    env_val = os.getenv(env_name)
+    if env_val is not None and env_val.strip() != "":
+        lowered = env_val.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError(f"Invalid boolean value {env_val!r} for {env_name}")
+    return _bool(raw_val, default)
+
+
+_JOB_KEY_ALIASES: dict[str, str] = {
+    "include_dirs": "include-dirs",
+    "depends_on": "depends-on",
+    "extra-args": "flags",
+    "extra_args": "flags",
+}
+_DEDUP_LIST_KEYS: frozenset[str] = frozenset({"include-dirs", "defines", "depends-on"})
+
+
+def _merge_job_dicts(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    """Deep-merge profile and job dictionaries while preserving flag order."""
     merged = dict(base)
-    merged.update(extra)
+    for raw_key, value in extra.items():
+        key = _JOB_KEY_ALIASES.get(raw_key, raw_key)
+        if value is None:
+            merged.setdefault(key, None)
+            continue
+        if key == "flags":
+            merged["flags"] = [*_as_list(merged.get("flags")), *_as_list(value)]
+        elif key in _DEDUP_LIST_KEYS:
+            merged[key] = list(dict.fromkeys([*_as_list(merged.get(key)), *_as_list(value)]))
+        elif key == "env":
+            if not isinstance(value, dict):
+                raise TypeError("env must be a dict")
+            merged["env"] = {**dict(merged.get("env") or {}), **{str(k): str(v) for k, v in value.items()}}
+        else:
+            merged[key] = value
     return merged
 
 
@@ -108,6 +147,11 @@ def _validate_job(name: str, data: dict[str, Any]) -> JobConfig:
         raise ValueError(f"Job '{name}' emit=python-extension requires 'module'")
 
     install_cfg = data.get("install")
+    if install_cfg is not None and not isinstance(install_cfg, dict):
+        raise TypeError(f"Job '{name}' install must be a dict")
+    if emit_value == "python-extension" and install_cfg is not None:
+        raise ValueError(f"Job '{name}' emit=python-extension does not accept 'install'")
+
     install_kind: InstallKind | None = None
     install_path: str | None = None
     if isinstance(install_cfg, dict):
@@ -115,7 +159,7 @@ def _validate_job(name: str, data: dict[str, Any]) -> JobConfig:
         install_path = install_cfg.get("path")
         if install_kind and install_kind not in {"package", "data", "scripts", "root", "force-include"}:
             raise ValueError(f"Job '{name}' has invalid install.kind '{install_kind}'")
-        if install_kind and not install_path:
+        if install_kind and install_kind != "root" and (not install_path or not str(install_path).strip().strip("/")):
             raise ValueError(f"Job '{name}' install requires 'path'")
 
     if emit_value != "python-extension" and install_kind is None:
@@ -151,9 +195,17 @@ def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
     if not isinstance(profiles, dict):
         raise TypeError("profiles must be a dict")
 
-    jobs_raw = raw.get("jobs") or raw.get("sources") or []
+    if "jobs" in raw and raw["jobs"] is not None:
+        jobs_raw = raw["jobs"]
+    elif "sources" in raw and raw["sources"] is not None:
+        jobs_raw = raw["sources"]
+    else:
+        jobs_raw = []
     if not isinstance(jobs_raw, list):
         raise TypeError("jobs/sources must be a list")
+
+    skip_editable = _env_bool("HATCH_MOJO_SKIP_EDITABLE", raw.get("skip-editable"), False)
+    cache = _env_bool("HATCH_MOJO_CACHE", raw.get("cache"), True)
 
     jobs: list[JobConfig] = []
     include = tuple(_as_list(raw.get("include")))
@@ -167,8 +219,8 @@ def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
             profile = profiles.get(profile_name)
             if not isinstance(profile, dict):
                 raise ValueError(f"Unknown profile '{profile_name}' in jobs[{index}]")
-            merged = _merge_dict(merged, profile)
-        merged = _merge_dict(merged, job_item)
+            merged = _merge_job_dicts(merged, profile)
+        merged = _merge_job_dicts(merged, job_item)
         name = str(merged.get("name") or f"job-{index + 1}")
         job = _validate_job(name, merged)
         if include and not any(fnmatch.fnmatch(job.input, pattern) for pattern in include):
@@ -184,8 +236,9 @@ def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
             fail_fast=_bool(raw.get("fail-fast"), True),
             clean_before_build=_bool(raw.get("clean-before-build"), False),
             clean_after_build=_bool(raw.get("clean-after-build"), False),
-            skip_editable=_bool(raw.get("skip-editable"), True),
+            skip_editable=skip_editable,
             bundle_libs=_bool(raw.get("bundle-libs"), True),
+            cache=cache,
             build_dir=str(raw.get("build-dir") or "build/mojo"),
             include=include,
             exclude=exclude,
@@ -203,8 +256,9 @@ def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
         fail_fast=_bool(raw.get("fail-fast"), True),
         clean_before_build=_bool(raw.get("clean-before-build"), False),
         clean_after_build=_bool(raw.get("clean-after-build"), False),
-        skip_editable=_bool(raw.get("skip-editable"), True),
+        skip_editable=skip_editable,
         bundle_libs=_bool(raw.get("bundle-libs"), True),
+        cache=cache,
         build_dir=str(build_dir),
         include=include,
         exclude=exclude,

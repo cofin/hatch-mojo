@@ -83,8 +83,10 @@ def test_parse_config_invalid_profile_type() -> None:
 
 
 def test_parse_config_invalid_jobs_type() -> None:
-    with pytest.raises(ValueError, match="No build jobs resolved"):
+    with pytest.raises(TypeError, match="jobs/sources must be a list"):
         parse_config({"jobs": {}}, target_name="wheel")
+    with pytest.raises(TypeError, match="jobs/sources must be a list"):
+        parse_config({"sources": 123}, target_name="wheel")
 
 
 def test_parse_config_unknown_profile() -> None:
@@ -289,3 +291,146 @@ def test_parse_config_rejects_removed_mojo_0x_paths(field: str, bad_path: str) -
     job_dict[field] = bad_path
     with pytest.raises(ValueError, match=r"Mojo 0\.x"):
         parse_config({"jobs": [job_dict]}, target_name="wheel")
+
+
+def test_parse_config_profile_deep_merge() -> None:
+    config = parse_config(
+        {
+            "profiles": {
+                "base": {
+                    "include-dirs": ["src/mo", "src/shared"],
+                    "defines": ["A=1", "B=2"],
+                    "flags": ["-Xlinker", "-foo"],
+                    "depends-on": ["prep"],
+                    "env": {"FOO": "base", "SHARED": "1"},
+                },
+                "opt": {
+                    "include_dirs": ["src/shared", "src/opt"],
+                    "defines": ["B=2", "C=3"],
+                    "extra-args": ["-O3", "-Xlinker", "-bar"],
+                    "depends_on": ["prep", "codegen"],
+                    "env": {"BAR": "opt", "SHARED": "2"},
+                },
+            },
+            "jobs": [
+                {
+                    "name": "core",
+                    "profiles": ["base", "opt"],
+                    "input": "src/mo/pkg/core.mojo",
+                    "emit": "python-extension",
+                    "module": "pkg._core",
+                    "include-dirs": ["src/mo", "src/local"],
+                    "defines": ["A=1", "D=4"],
+                    "flags": ["-Xlinker", "-baz"],
+                    "depends-on": ["codegen", "post"],
+                    "env": {"SHARED": "job", "LOCAL": "yes"},
+                }
+            ],
+        },
+        target_name="wheel",
+    )
+    job = config.jobs[0]
+    assert job.flags == ("-Xlinker", "-foo", "-O3", "-Xlinker", "-bar", "-Xlinker", "-baz")
+    assert job.include_dirs == ("src/mo", "src/shared", "src/opt", "src/local")
+    assert job.defines == ("A=1", "B=2", "C=3", "D=4")
+    assert job.depends_on == ("prep", "codegen", "post")
+    assert job.env == {"FOO": "base", "BAR": "opt", "SHARED": "job", "LOCAL": "yes"}
+
+
+def test_parse_config_rejects_non_dict_install_and_extension_install() -> None:
+    with pytest.raises(TypeError, match="install"):
+        parse_config(
+            {
+                "jobs": [
+                    {
+                        "name": "cli",
+                        "input": "cli.mojo",
+                        "emit": "executable",
+                        "install": "bin",
+                    }
+                ]
+            },
+            target_name="wheel",
+        )
+
+    with pytest.raises(ValueError, match="path"):
+        parse_config(
+            {
+                "jobs": [
+                    {
+                        "name": "cli",
+                        "input": "cli.mojo",
+                        "emit": "executable",
+                        "install": {"kind": "scripts", "path": " / "},
+                    }
+                ]
+            },
+            target_name="wheel",
+        )
+
+    with pytest.raises(ValueError, match="install"):
+        parse_config(
+            {
+                "jobs": [
+                    {
+                        "name": "ext",
+                        "input": "core.mojo",
+                        "emit": "python-extension",
+                        "module": "pkg._core",
+                        "install": {"kind": "root", "path": "x"},
+                    }
+                ]
+            },
+            target_name="wheel",
+        )
+
+    root_cfg = parse_config(
+        {
+            "jobs": [
+                {
+                    "name": "top",
+                    "input": "top.mojo",
+                    "emit": "shared-lib",
+                    "install": {"kind": "root"},
+                }
+            ]
+        },
+        target_name="wheel",
+    )
+    assert root_cfg.jobs[0].install_kind == "root"
+    assert root_cfg.jobs[0].install_path is None
+
+
+def test_parse_config_skip_editable_and_cache_defaults_and_env_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("HATCH_MOJO_SKIP_EDITABLE", raising=False)
+    monkeypatch.delenv("HATCH_MOJO_CACHE", raising=False)
+
+    raw = {
+        "jobs": [
+            {
+                "name": "core",
+                "input": "src/mo/pkg/core.mojo",
+                "emit": "python-extension",
+                "module": "pkg._core",
+            }
+        ]
+    }
+    cfg = parse_config(raw, target_name="wheel")
+    assert cfg.skip_editable is False
+    assert cfg.cache is True
+
+    inactive = parse_config(raw, target_name="sdist")
+    assert inactive.skip_editable is False
+    assert inactive.cache is True
+
+    monkeypatch.setenv("HATCH_MOJO_SKIP_EDITABLE", "1")
+    monkeypatch.setenv("HATCH_MOJO_CACHE", "false")
+    overridden = parse_config({**raw, "skip-editable": False, "cache": True}, target_name="wheel")
+    assert overridden.skip_editable is True
+    assert overridden.cache is False
+
+    monkeypatch.setenv("HATCH_MOJO_CACHE", "maybe")
+    with pytest.raises(ValueError, match="HATCH_MOJO_CACHE"):
+        parse_config(raw, target_name="wheel")
