@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-EmitType = Literal["python-extension", "shared-lib", "static-lib", "object", "executable"]
+EmitType = Literal["python-extension", "shared-lib", "mojoc", "object", "executable"]
 InstallKind = Literal["package", "data", "scripts", "root", "force-include"]
 
-EMIT_VALUES: tuple[EmitType, ...] = ("python-extension", "shared-lib", "static-lib", "object", "executable")
+EMIT_VALUES: tuple[EmitType, ...] = ("python-extension", "shared-lib", "mojoc", "object", "executable")
 
 
 @dataclass(slots=True, frozen=True)

@@ -47,7 +47,7 @@ def register_artifacts(*, root: Path, build_data: dict[str, Any], jobs: list[Bui
         else:
             raise ValueError(f"Unknown install kind '{job.install_kind}' for {job.name}")
 
-        if job.emit != "object":
+        if job.emit not in {"object", "mojoc"}:
             has_native = True
 
     if target_name == "wheel" and has_native:

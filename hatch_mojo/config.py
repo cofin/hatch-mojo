@@ -77,12 +77,29 @@ def _merge_dict(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+_REMOVED_MOJO_0X_SUFFIXES: tuple[str, ...] = (".🔥", "📦", ".mojopkg")
+
+
 def _validate_job(name: str, data: dict[str, Any]) -> JobConfig:
     input_value = data.get("input")
     if not input_value:
         raise ValueError(f"Job '{name}' is missing required 'input'")
 
+    input_str = str(input_value)
+    output_raw = data.get("output")
+    output_str = str(output_raw) if output_raw else None
+    for path_candidate in (input_str, output_str):
+        if path_candidate and path_candidate.endswith(_REMOVED_MOJO_0X_SUFFIXES):
+            msg = (
+                f"Job '{name}' uses removed Mojo 0.x path '{path_candidate}'; "
+                "'.🔥', '📦', and '.mojopkg' are unsupported in Mojo 1.x (use '.mojo' or emit='mojoc')"
+            )
+            raise ValueError(msg)
+
     emit_value = data.get("emit", "shared-lib")
+    if emit_value == "static-lib":
+        msg = f"Job '{name}' uses removed emit 'static-lib'; Mojo 1.x does not support static-lib (use 'object' or 'mojoc')"
+        raise ValueError(msg)
     if emit_value not in EMIT_VALUES:
         raise ValueError(f"Job '{name}' has invalid emit '{emit_value}'")
 

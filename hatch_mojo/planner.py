@@ -28,7 +28,7 @@ def _get_suffix_map() -> dict[str, str]:
         return {
             "python-extension": ".pyd",
             "shared-lib": ".dll",
-            "static-lib": ".lib",
+            "mojoc": ".mojoc",
             "object": ".obj",
             "executable": ".exe",
         }
@@ -36,14 +36,14 @@ def _get_suffix_map() -> dict[str, str]:
         return {
             "python-extension": ".so",
             "shared-lib": ".dylib",
-            "static-lib": ".a",
+            "mojoc": ".mojoc",
             "object": ".o",
             "executable": "",
         }
     return {
         "python-extension": ".so",
         "shared-lib": ".so",
-        "static-lib": ".a",
+        "mojoc": ".mojoc",
         "object": ".o",
         "executable": "",
     }

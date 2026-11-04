@@ -1,5 +1,5 @@
 .agents/scratch/
-specs
+/specs
 GEMINI.md
 CLAUDE.md
 .geminiignore

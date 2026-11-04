@@ -32,14 +32,38 @@ def discover_mojo(root: Path, configured: str | None) -> str:
     raise FileNotFoundError(msg)
 
 
+def _format_cli_path(path: Path, root: Path) -> str:
+    """Format *path* relative to *root* when inside *root*, else as a full path string."""
+    if path.is_relative_to(root):
+        return str(path.relative_to(root))
+    return str(path)
+
+
 def build_command(mojo_bin: str, root: Path, job: BuildJob) -> list[str]:
-    """Build the mojo compiler command for one job."""
+    """Build the Mojo CLI argv for *job*.
+
+    Jobs with ``emit == "mojoc"`` invoke ``mojo precompile`` without ``--emit`` or
+    Mach-O linker flags. Linkable native targets invoke ``mojo build --emit`` (mapping
+    ``"executable"`` to ``"exe"``) and append ``-Xlinker -headerpad_max_install_names``
+    on macOS so ``install_name_tool`` has sufficient Mach-O header space during bundling.
+    """
+    input_arg = _format_cli_path(job.input_path, root)
+    output_arg = _format_cli_path(job.output_path, root)
+
+    if job.emit == "mojoc":
+        precompile_cmd: list[str] = [mojo_bin, "precompile"]
+        for include_dir in job.include_dirs:
+            precompile_cmd.extend(["-I", include_dir])
+        for define in job.defines:
+            precompile_cmd.extend(["-D", define])
+        precompile_cmd.extend([*job.flags, input_arg, "-o", output_arg])
+        return precompile_cmd
+
     emit_map = {
         "python-extension": "shared-lib",
         "shared-lib": "shared-lib",
-        "static-lib": "static-lib",
         "object": "object",
-        "executable": "executable",
+        "executable": "exe",
     }
     command: list[str] = [mojo_bin, "build", "--emit", emit_map[job.emit]]
     for include_dir in job.include_dirs:
@@ -48,10 +72,9 @@ def build_command(mojo_bin: str, root: Path, job: BuildJob) -> list[str]:
         command.extend(["-D", define])
 
     if sys.platform == "darwin" and job.emit in {"python-extension", "shared-lib", "executable"}:
-        # Ensure we have enough Mach-O header space to run install_name_tool later
         command.extend(["-Xlinker", "-headerpad_max_install_names"])
 
-    command.extend([*job.flags, str(job.input_path.relative_to(root)), "-o", str(job.output_path.relative_to(root))])
+    command.extend([*job.flags, input_arg, "-o", output_arg])
     return command
 
 

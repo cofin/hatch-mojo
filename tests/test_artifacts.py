@@ -57,7 +57,7 @@ def test_register_python_extension_requires_module(tmp_path: Path) -> None:
 def test_register_non_python_variants(tmp_path: Path) -> None:
     build_data: dict[str, object] = {}
     bin_a = tmp_path / "a.so"
-    bin_b = tmp_path / "b.a"
+    bin_b = tmp_path / "b.mojoc"
     bin_c = tmp_path / "c"
     bin_d = tmp_path / "d.bin"
     for item in (bin_a, bin_b, bin_c, bin_d):
@@ -65,7 +65,7 @@ def test_register_non_python_variants(tmp_path: Path) -> None:
 
     jobs = [
         BuildJob("a", tmp_path / "a.mojo", bin_a, "shared-lib", None, "package", "mypkg", (), (), (), {}, ()),
-        BuildJob("b", tmp_path / "b.mojo", bin_b, "static-lib", None, "root", "ignored", (), (), (), {}, ()),
+        BuildJob("b", tmp_path / "b.mojo", bin_b, "mojoc", None, "root", "ignored", (), (), (), {}, ()),
         BuildJob("c", tmp_path / "c.mojo", bin_c, "executable", None, "force-include", "bin/tool", (), (), (), {}, ()),
         BuildJob("d", tmp_path / "d.mojo", bin_d, "object", None, "data", "share", (), (), (), {}, ()),
     ]
@@ -75,10 +75,25 @@ def test_register_non_python_variants(tmp_path: Path) -> None:
     assert isinstance(force_include, dict)
     assert isinstance(artifacts, list)
     assert force_include[str(bin_a)] == "mypkg/a.so"
-    assert force_include[str(bin_b)] == "b.a"
+    assert force_include[str(bin_b)] == "b.mojoc"
     assert force_include[str(bin_c)] == "bin/tool"
     assert force_include[str(bin_d)] == "share/d.bin"
     assert "d.bin" in artifacts[0]
+
+
+def test_register_mojoc_only_keeps_pure_python(tmp_path: Path) -> None:
+    build_data: dict[str, object] = {}
+    ir_file = tmp_path / "mod.mojoc"
+    obj_file = tmp_path / "mod.o"
+    ir_file.write_bytes(b"x")
+    obj_file.write_bytes(b"x")
+    jobs = [
+        BuildJob("ir", tmp_path / "mod.mojo", ir_file, "mojoc", None, "package", "mypkg", (), (), (), {}, ()),
+        BuildJob("obj", tmp_path / "mod.mojo", obj_file, "object", None, "package", "mypkg", (), (), (), {}, ()),
+    ]
+    register_artifacts(root=tmp_path, build_data=build_data, jobs=jobs, target_name="wheel")
+    assert "infer_tag" not in build_data
+    assert "pure_python" not in build_data
 
 
 def test_register_requires_install_for_non_python(tmp_path: Path) -> None:

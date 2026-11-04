@@ -33,6 +33,85 @@ def test_build_command(tmp_path: Path) -> None:
     assert "-D" in command
 
 
+def test_build_command_executable_uses_emit_exe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("hatch_mojo.compiler.sys.platform", "darwin")
+    job = BuildJob(
+        name="cli",
+        input_path=tmp_path / "src/cli.mojo",
+        output_path=tmp_path / "build/mojo/cli",
+        emit="executable",
+        module=None,
+        install_kind="scripts",
+        install_path="bin",
+        include_dirs=("src",),
+        defines=("FAST=1",),
+        flags=("-O3",),
+        env={},
+        depends_on=(),
+    )
+    command = build_command("mojo", tmp_path, job)
+    assert command[:4] == ["mojo", "build", "--emit", "exe"]
+    assert "-headerpad_max_install_names" in command
+    assert command[-3:] == ["src/cli.mojo", "-o", "build/mojo/cli"]
+
+
+def test_build_command_mojoc_uses_precompile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("hatch_mojo.compiler.sys.platform", "darwin")
+    job = BuildJob(
+        name="pkg_ir",
+        input_path=tmp_path / "src/pkg/mod.mojo",
+        output_path=tmp_path / "build/mojo/mod.mojoc",
+        emit="mojoc",
+        module=None,
+        install_kind="package",
+        install_path="pkg",
+        include_dirs=("src",),
+        defines=("DEBUG=0",),
+        flags=("--debug-level", "none"),
+        env={},
+        depends_on=(),
+    )
+    command = build_command("mojo", tmp_path, job)
+    assert command == [
+        "mojo",
+        "precompile",
+        "-I",
+        "src",
+        "-D",
+        "DEBUG=0",
+        "--debug-level",
+        "none",
+        "src/pkg/mod.mojo",
+        "-o",
+        "build/mojo/mod.mojoc",
+    ]
+    assert "--emit" not in command
+    assert "-headerpad_max_install_names" not in command
+
+
+def test_build_command_outside_root_paths(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    ext_in = tmp_path / "external_src.mojo"
+    ext_out = tmp_path / "external_out.so"
+    job = BuildJob(
+        name="ext",
+        input_path=ext_in,
+        output_path=ext_out,
+        emit="python-extension",
+        module="pkg._ext",
+        install_kind=None,
+        install_path=None,
+        include_dirs=(),
+        defines=(),
+        flags=(),
+        env={},
+        depends_on=(),
+    )
+    command = build_command("mojo", root, job)
+    assert command[-3:] == [str(ext_in), "-o", str(ext_out)]
+
+
 def test_discover_mojo_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HATCH_MOJO_BIN", raising=False)
     monkeypatch.setattr("hatch_mojo.compiler.shutil.which", lambda _: None)

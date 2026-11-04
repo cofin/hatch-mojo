@@ -215,3 +215,77 @@ def test_parse_config_rejects_invalid_marker() -> None:
             },
             target_name="wheel",
         )
+
+
+def test_parse_config_accepts_mojoc_with_install() -> None:
+    config = parse_config(
+        {
+            "jobs": [
+                {
+                    "name": "pkg_ir",
+                    "input": "src/mo/pkg/lib.mojo",
+                    "emit": "mojoc",
+                    "install": {"kind": "package", "path": "pkg"},
+                }
+            ]
+        },
+        target_name="wheel",
+    )
+    assert len(config.jobs) == 1
+    assert config.jobs[0].emit == "mojoc"
+    assert config.jobs[0].install_kind == "package"
+
+
+def test_parse_config_mojoc_requires_install() -> None:
+    with pytest.raises(ValueError, match="requires explicit install mapping"):
+        parse_config(
+            {
+                "jobs": [
+                    {
+                        "name": "pkg_ir",
+                        "input": "src/mo/pkg/lib.mojo",
+                        "emit": "mojoc",
+                    }
+                ]
+            },
+            target_name="wheel",
+        )
+
+
+def test_parse_config_rejects_removed_static_lib() -> None:
+    with pytest.raises(ValueError, match=r"static-lib.*Mojo 1\.x"):
+        parse_config(
+            {
+                "jobs": [
+                    {
+                        "name": "legacy_static",
+                        "input": "src/mo/pkg/lib.mojo",
+                        "emit": "static-lib",
+                        "install": {"kind": "package", "path": "pkg"},
+                    }
+                ]
+            },
+            target_name="wheel",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_path"),
+    [
+        ("input", "src/core.🔥"),
+        ("input", "src/pkg📦"),
+        ("input", "dist/core.mojopkg"),
+        ("output", "pkg.mojopkg"),
+        ("output", "build/core.🔥"),
+        ("output", "build/pkg📦"),
+    ],
+)
+def test_parse_config_rejects_removed_mojo_0x_paths(field: str, bad_path: str) -> None:
+    job_dict: dict[str, object] = {
+        "name": "legacy_path",
+        "input": "src/mo/pkg/core.mojo",
+        "emit": "shared-lib",
+    }
+    job_dict[field] = bad_path
+    with pytest.raises(ValueError, match=r"Mojo 0\.x"):
+        parse_config({"jobs": [job_dict]}, target_name="wheel")

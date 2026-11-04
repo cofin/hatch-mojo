@@ -155,7 +155,9 @@ def test_get_suffix_map_win32(monkeypatch: pytest.MonkeyPatch) -> None:
     m = _get_suffix_map()
     assert m["python-extension"] == ".pyd"
     assert m["shared-lib"] == ".dll"
+    assert m["mojoc"] == ".mojoc"
     assert m["executable"] == ".exe"
+    assert "static-lib" not in m
 
 
 def test_get_suffix_map_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -163,6 +165,8 @@ def test_get_suffix_map_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
     m = _get_suffix_map()
     assert m["python-extension"] == ".so"
     assert m["shared-lib"] == ".dylib"
+    assert m["mojoc"] == ".mojoc"
+    assert "static-lib" not in m
 
 
 def test_get_suffix_map_linux(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,6 +174,28 @@ def test_get_suffix_map_linux(monkeypatch: pytest.MonkeyPatch) -> None:
     m = _get_suffix_map()
     assert m["python-extension"] == ".so"
     assert m["shared-lib"] == ".so"
+    assert m["mojoc"] == ".mojoc"
+    assert "static-lib" not in m
+
+
+def test_plan_jobs_mojoc_default_output(tmp_path: Path) -> None:
+    (tmp_path / "src/mo").mkdir(parents=True)
+    (tmp_path / "src/mo/core.mojo").write_text("", encoding="utf-8")
+    config = parse_config(
+        {
+            "jobs": [
+                {
+                    "name": "core_ir",
+                    "input": "src/mo/core.mojo",
+                    "emit": "mojoc",
+                    "install": {"kind": "package", "path": "mogemma"},
+                }
+            ]
+        },
+        target_name="wheel",
+    )
+    jobs = plan_jobs(tmp_path, config)
+    assert jobs[0].output_path == tmp_path / "build/mojo/core.mojoc"
 
 
 def test_module_aware_default_output(tmp_path: Path) -> None:
