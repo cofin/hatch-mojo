@@ -906,7 +906,7 @@ def test_bundle_ensures_writable_copies(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_license_notice_content(tmp_path: Path) -> None:
-    """Notice file lists all bundled libraries in sorted order."""
+    """Notice file cites Apache-2.0 WITH LLVM-exception and lists libraries sorted."""
     libs_dir = tmp_path / "pkg.libs"
     libs_dir.mkdir()
     modular_lib = tmp_path / "modular" / "lib"
@@ -917,31 +917,89 @@ def test_license_notice_content(tmp_path: Path) -> None:
 
     notice = libs_dir / "NOTICE.mojo-runtime"
     assert notice.exists()
-    content = notice.read_text()
+    content = notice.read_text(encoding="utf-8")
     assert "  - libA.so" in content
     assert "  - libB.so" in content
-    # Sorted: A before B
     assert content.index("libA.so") < content.index("libB.so")
-    assert "Modular Community License" in content
+    assert "Apache License 2.0 with LLVM Exceptions" in content
+    assert "Apache-2.0 WITH LLVM-exception" in content
+    assert "https://github.com/modular/modular/blob/main/LICENSE" in content
+    assert "Modular Inc, a Qualcomm Company" in content
+    assert "Modular Community License" not in content
+    assert "max-mojo-license" not in content
+    assert "https://www.modular.com/legal/max-license" not in content
     assert entries[0] == (str(notice), "pkg.libs/NOTICE.mojo-runtime")
 
 
+@pytest.mark.parametrize("max_lib", ["libMAXEngine.so", "libMOGGKernelAPI.so"])
+def test_license_notice_appends_max_addendum_when_max_libs_present(
+    tmp_path: Path,
+    max_lib: str,
+) -> None:
+    libs_dir = tmp_path / "pkg.libs"
+    libs_dir.mkdir()
+    modular_lib = tmp_path / "modular" / "lib"
+    modular_lib.mkdir(parents=True)
+
+    _write_license_notice(libs_dir, ["libKGENCompilerRTShared.so", max_lib], modular_lib)
+    content = (libs_dir / "NOTICE.mojo-runtime").read_text(encoding="utf-8")
+    assert "Apache-2.0 WITH LLVM-exception" in content
+    assert "MAX License" in content
+    assert "https://www.modular.com/legal/max-license" in content
+    assert "Section 1.5" in content
+
+
 def test_bundle_copies_sdk_license_when_present(tmp_path: Path) -> None:
-    """SDK LICENSE is copied as LICENSE.mojo-runtime when it exists."""
+    """SDK LICENSE is copied as writable LICENSE.mojo-runtime when it exists."""
     libs_dir = tmp_path / "pkg.libs"
     libs_dir.mkdir()
     modular_dir = tmp_path / "modular"
     modular_lib = modular_dir / "lib"
     modular_lib.mkdir(parents=True)
-    (modular_dir / "LICENSE").write_text("Modular license text")
+    sdk_license = modular_dir / "LICENSE"
+    sdk_license.write_text("Apache-2.0 WITH LLVM-exception text", encoding="utf-8")
+    sdk_license.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
 
     entries = _write_license_notice(libs_dir, ["libFoo.so"], modular_lib)
 
     assert len(entries) == 2
     license_dest = libs_dir / "LICENSE.mojo-runtime"
     assert license_dest.exists()
-    assert license_dest.read_text() == "Modular license text"
+    assert license_dest.read_text(encoding="utf-8") == "Apache-2.0 WITH LLVM-exception text"
+    assert license_dest.stat().st_mode & stat.S_IWUSR
     assert entries[1] == (str(license_dest), "pkg.libs/LICENSE.mojo-runtime")
+
+
+@pytest.mark.parametrize(
+    "dist_info_rel",
+    [
+        "mojo_compiler-1.2.0.dist-info/licenses/LICENSE",
+        "mojo_compiler_mojo_libs-1.2.0.dist-info/licenses/LICENSE.txt",
+        "mojo-1.2.0.dist-info/LICENSE",
+    ],
+)
+def test_bundle_copies_sdk_license_from_dist_info(
+    tmp_path: Path,
+    dist_info_rel: str,
+) -> None:
+    libs_dir = tmp_path / "pkg.libs"
+    libs_dir.mkdir()
+    site_packages = tmp_path / "site-packages"
+    modular_lib = site_packages / "modular" / "lib"
+    modular_lib.mkdir(parents=True)
+
+    dist_license = site_packages / dist_info_rel
+    dist_license.parent.mkdir(parents=True, exist_ok=True)
+    dist_license.write_text("Dist-info Apache-2.0 license", encoding="utf-8")
+    dist_license.chmod(stat.S_IRUSR)
+
+    entries = _write_license_notice(libs_dir, ["libKGENCompilerRTShared.so"], modular_lib)
+
+    assert len(entries) == 2
+    dest = libs_dir / "LICENSE.mojo-runtime"
+    assert dest.read_text(encoding="utf-8") == "Dist-info Apache-2.0 license"
+    assert dest.stat().st_mode & stat.S_IWUSR
+    assert entries[1] == (str(dest), "pkg.libs/LICENSE.mojo-runtime")
 
 
 def test_bundle_skips_sdk_license_when_absent(tmp_path: Path) -> None:
@@ -953,7 +1011,7 @@ def test_bundle_skips_sdk_license_when_absent(tmp_path: Path) -> None:
 
     entries = _write_license_notice(libs_dir, ["libFoo.so"], modular_lib)
 
-    assert len(entries) == 1  # only NOTICE, no LICENSE
+    assert len(entries) == 1
     assert not (libs_dir / "LICENSE.mojo-runtime").exists()
 
 

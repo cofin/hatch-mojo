@@ -161,18 +161,55 @@ def discover_modular_lib(root: Path, mojo_bin: str | None) -> Path:
 
 
 _MOJO_RUNTIME_NOTICE = """\
-This directory contains Mojo runtime libraries bundled from the Modular SDK.
+This directory contains Mojo runtime libraries bundled from the Mojo / Modular SDK.
 
 Bundled libraries:
 {lib_list}
 
-These libraries are copyright Modular Inc. and are distributed under the
-Modular Community License. The full license text is available at:
+Copyright (c) Modular Inc, a Qualcomm Company.
+Mojo runtime libraries are licensed under the Apache License 2.0 with LLVM Exceptions
+(SPDX: Apache-2.0 WITH LLVM-exception):
 
-    https://modular.com/legal/max-mojo-license
-
-By using this software you agree to the terms of the Modular Community License.
+    https://github.com/modular/modular/blob/main/LICENSE
 """
+
+_MAX_RUNTIME_NOTICE_ADDENDUM = """
+Bundled MAX libraries in this directory are governed by the MAX License:
+
+    https://www.modular.com/legal/max-license
+
+Under Section 1.5 of the MAX License, Apache-2.0 WITH LLVM-exception terms continue
+to govern all Apache-licensed Mojo runtime components.
+"""
+
+_DIST_INFO_LICENSE_PATTERNS: tuple[str, ...] = (
+    "mojo*.dist-info/licenses/LICENSE*",
+    "mojo*.dist-info/LICENSE*",
+    "modular*.dist-info/licenses/LICENSE*",
+    "modular*.dist-info/LICENSE*",
+    "max*.dist-info/licenses/LICENSE*",
+    "max*.dist-info/LICENSE*",
+)
+
+
+def _has_max_libraries(lib_filenames: list[str]) -> bool:
+    """Return True when *lib_filenames* includes MAX engine or kernel libraries."""
+    return any(name.startswith(("libMAX", "libMOGG")) for name in lib_filenames)
+
+
+def _find_sdk_license(modular_lib: Path) -> Path | None:
+    """Locate the SDK ``LICENSE`` file from *modular_lib* or sibling ``.dist-info`` metadata."""
+    direct_license = modular_lib.parent / "LICENSE"
+    if direct_license.is_file():
+        return direct_license
+
+    site_root = modular_lib.parent.parent
+    if site_root.is_dir():
+        for pattern in _DIST_INFO_LICENSE_PATTERNS:
+            for candidate in sorted(site_root.glob(pattern)):
+                if candidate.is_file():
+                    return candidate
+    return None
 
 
 def _write_license_notice(
@@ -180,24 +217,26 @@ def _write_license_notice(
     lib_filenames: list[str],
     modular_lib: Path,
 ) -> list[tuple[str, str]]:
-    """Write license notices for bundled Mojo runtime libraries.
+    """Write ``NOTICE.mojo-runtime`` and copy ``LICENSE.mojo-runtime`` when available.
 
-    Returns a list of (abs_path, wheel_relative_path) entries for force_include.
+    Returns ``(abs_path, wheel_relative_path)`` pairs suitable for ``force_include``.
     """
-    pkg_libs = libs_dir.name  # e.g. "mogemma.libs"
+    pkg_libs = libs_dir.name
     entries: list[tuple[str, str]] = []
 
-    # Generate notice file
     lib_list = "\n".join(f"  - {f}" for f in sorted(lib_filenames))
+    notice_body = _MOJO_RUNTIME_NOTICE.format(lib_list=lib_list)
+    if _has_max_libraries(lib_filenames):
+        notice_body = f"{notice_body}{_MAX_RUNTIME_NOTICE_ADDENDUM}"
     notice = libs_dir / "NOTICE.mojo-runtime"
-    notice.write_text(_MOJO_RUNTIME_NOTICE.format(lib_list=lib_list))
+    notice.write_text(notice_body, encoding="utf-8")
     entries.append((str(notice), f"{pkg_libs}/NOTICE.mojo-runtime"))
 
-    # Copy SDK LICENSE if present
-    sdk_license = modular_lib.parent / "LICENSE"
-    if sdk_license.is_file():
+    sdk_license = _find_sdk_license(modular_lib)
+    if sdk_license is not None:
         dest = libs_dir / "LICENSE.mojo-runtime"
         shutil.copy2(sdk_license, dest)
+        dest.chmod(dest.stat().st_mode | stat.S_IWUSR)
         entries.append((str(dest), f"{pkg_libs}/LICENSE.mojo-runtime"))
 
     return entries
