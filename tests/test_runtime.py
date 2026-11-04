@@ -251,6 +251,18 @@ def test_discover_env_var_missing_sentinel(tmp_path: Path, monkeypatch: pytest.M
 # ── _compute_extension_rpath ────────────────────────────────────────────────
 
 
+def test_rpath_depth_0_linux() -> None:
+    with patch.object(sys, "platform", "linux"):
+        result = _compute_extension_rpath("_core", "_core")
+        assert result == ["$ORIGIN", "$ORIGIN/_core.libs"]
+
+
+def test_rpath_depth_0_darwin() -> None:
+    with patch.object(sys, "platform", "darwin"):
+        result = _compute_extension_rpath("_core", "_core")
+        assert result == ["@loader_path", "@loader_path/_core.libs"]
+
+
 def test_rpath_depth_1_linux() -> None:
     with patch.object(sys, "platform", "linux"):
         result = _compute_extension_rpath("mogemma._core", "mogemma")
@@ -313,6 +325,11 @@ def test_patch_rpath_darwin(tmp_path: Path) -> None:
                 check=True,
                 capture_output=True,
                 text=True,
+            ),
+            call(
+                ["codesign", "-s", "-", "-f", str(target)],
+                check=True,
+                capture_output=True,
             ),
         ]
 
@@ -654,6 +671,44 @@ def test_strip_absolute_rpaths_preserves_at_paths(tmp_path: Path) -> None:
     assert len(mock_run.call_args_list) == 1
 
 
+def test_strip_absolute_rpaths_ignores_non_lc_rpath_blocks(tmp_path: Path) -> None:
+    """Lines with 'path ' inside non-LC_RPATH load commands must not trigger -delete_rpath."""
+    otool_output = (
+        "Load command 0\n"
+        "      cmd LC_ID_DYLIB\n"
+        "  cmdsize 56\n"
+        "     name /opt/modular/lib/libFoo.dylib (offset 24)\n"
+        "Load command 1\n"
+        "      cmd LC_LOAD_DYLIB\n"
+        "  cmdsize 56\n"
+        "     path /usr/local/something (offset 24)\n"
+        "Load command 2\n"
+        "      cmd LC_RPATH\n"
+        "  cmdsize 40\n"
+        "     path /opt/modular/lib (offset 12)\n"
+        "Load command 3\n"
+        "      cmd LC_SYMTAB\n"
+        "  cmdsize 24\n"
+        "     path /tmp/ignored (offset 8)\n"
+    )
+    target = tmp_path / "lib.dylib"
+    target.write_bytes(b"")
+    mock_result = SimpleNamespace(stdout=otool_output)
+
+    with patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result) as mock_run:
+        _strip_absolute_rpaths(target)
+
+    calls = mock_run.call_args_list
+    assert len(calls) == 2
+    assert calls[0].args[0] == ["otool", "-l", str(target)]
+    assert calls[1].args[0] == [
+        "install_name_tool",
+        "-delete_rpath",
+        "/opt/modular/lib",
+        str(target),
+    ]
+
+
 # ── _run_install_name_tool ───────────────────────────────────────────────────
 
 
@@ -780,7 +835,7 @@ def test_patch_macos_dylibs_ignores_system_libs(tmp_path: Path) -> None:
 
 
 def test_patch_macos_extension_rewrites_refs_and_adds_rpath(tmp_path: Path) -> None:
-    """Full extension patching: -change for bundled libs, then -add_rpath."""
+    """Full extension patching: strip absolute RPATHs, -change bundled libs, -add_rpath, codesign."""
     ext = tmp_path / "_core.so"
     ext.write_bytes(b"")
     linked = [
@@ -791,41 +846,60 @@ def test_patch_macos_extension_rewrites_refs_and_adds_rpath(tmp_path: Path) -> N
     rpaths = ["@loader_path", "@loader_path/../mogemma.libs"]
 
     with (
-        patch("hatch_mojo.runtime.subprocess.run") as mock_run,
+        patch("hatch_mojo.runtime.subprocess.run", return_value=SimpleNamespace(stdout="")) as mock_run,
         patch("hatch_mojo.runtime._get_linked_libraries", return_value=linked),
     ):
         _patch_macos_extension(ext, lib_filenames, rpaths)
 
     calls = mock_run.call_args_list
-    # -change for the modular lib
-    assert calls[0].args[0] == [
+    assert calls[0].args[0] == ["otool", "-l", str(ext)]
+    assert calls[1].args[0] == [
         "install_name_tool",
         "-change",
         "/opt/modular/lib/libKGENCompilerRTShared.dylib",
         "@rpath/libKGENCompilerRTShared.dylib",
         str(ext),
     ]
-    # first -add_rpath
-    assert calls[1].args[0] == [
+    assert calls[2].args[0] == [
         "install_name_tool",
         "-add_rpath",
         "@loader_path",
         str(ext),
     ]
-    # second -add_rpath
-    assert calls[2].args[0] == [
+    assert calls[3].args[0] == [
         "install_name_tool",
         "-add_rpath",
         "@loader_path/../mogemma.libs",
         str(ext),
     ]
-    # codesign
-    assert calls[3].args[0] == [
+    assert calls[4].args[0] == [
         "codesign",
         "-s",
         "-",
         "-f",
         str(ext),
+    ]
+
+
+def test_patch_macos_extension_strips_residual_absolute_rpaths(tmp_path: Path) -> None:
+    """_patch_macos_extension deletes residual absolute LC_RPATH entries before adding @loader_path."""
+    ext = tmp_path / "_core.so"
+    ext.write_bytes(b"")
+    otool_output = "Load command 0\n      cmd LC_RPATH\n  cmdsize 40\n    path /opt/modular/lib (offset 12)\n"
+
+    with (
+        patch("hatch_mojo.runtime.subprocess.run", return_value=SimpleNamespace(stdout=otool_output)) as mock_run,
+        patch("hatch_mojo.runtime._get_linked_libraries", return_value=[]),
+    ):
+        _patch_macos_extension(ext, ["libFoo.dylib"], ["@loader_path", "@loader_path/../pkg.libs"])
+
+    calls = [c.args[0] for c in mock_run.call_args_list]
+    assert calls == [
+        ["otool", "-l", str(ext)],
+        ["install_name_tool", "-delete_rpath", "/opt/modular/lib", str(ext)],
+        ["install_name_tool", "-add_rpath", "@loader_path", str(ext)],
+        ["install_name_tool", "-add_rpath", "@loader_path/../pkg.libs", str(ext)],
+        ["codesign", "-s", "-", "-f", str(ext)],
     ]
 
 
@@ -846,9 +920,9 @@ def test_patch_macos_extension_skips_existing_rpath(tmp_path: Path) -> None:
     ):
         _patch_macos_extension(ext, ["libFoo.dylib"], rpaths)
 
-    # -add_rpath will be called twice and fail twice, plus one codesign call = 3 total calls.
-    assert mock_run.call_count == 3
-    assert mock_run.call_args_list[2].args[0] == [
+    assert mock_run.call_count == 4
+    assert mock_run.call_args_list[0].args[0] == ["otool", "-l", str(ext)]
+    assert mock_run.call_args_list[3].args[0] == [
         "codesign",
         "-s",
         "-",

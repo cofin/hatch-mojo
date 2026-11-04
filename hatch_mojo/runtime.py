@@ -328,12 +328,12 @@ def _run_install_name_tool(args: list[str], ignore_errors: list[str] | None = No
 
 
 def _strip_absolute_rpaths(target: Path) -> None:
-    """Remove absolute RPATHs from a Mach-O binary.
+    """Remove absolute ``LC_RPATH`` entries from a Mach-O binary.
 
-    Bundled dylibs may carry residual RPATHs from the SDK build environment
-    (e.g. ``/opt/modular/lib``).  Stripping them prevents the dynamic linker
-    from accidentally loading a different version from the SDK on developer
-    machines.
+    Bundled dylibs and extensions may carry residual RPATHs from the SDK build
+    environment (e.g. ``/opt/modular/lib``). Stripping them prevents the dynamic
+    linker from accidentally loading a different version from the SDK on
+    developer machines.
     """
     result = subprocess.run(
         ["otool", "-l", str(target)],  # noqa: S607
@@ -341,9 +341,17 @@ def _strip_absolute_rpaths(target: Path) -> None:
         capture_output=True,
         text=True,
     )
+    in_lc_rpath = False
     for line in result.stdout.splitlines():
-        if "path " in line:
-            rpath = line.split("path ")[1].split(" (offset")[0].strip()
+        stripped = line.strip()
+        if stripped == "cmd LC_RPATH":
+            in_lc_rpath = True
+            continue
+        if stripped.startswith("Load command ") or (stripped.startswith("cmd ") and stripped != "cmd LC_RPATH"):
+            in_lc_rpath = False
+            continue
+        if in_lc_rpath and stripped.startswith("path "):
+            rpath = stripped.split("path ", 1)[1].split(" (offset", 1)[0].strip()
             if rpath and not rpath.startswith("@"):
                 _run_install_name_tool(
                     ["-delete_rpath", rpath, str(target)],
@@ -394,7 +402,8 @@ def _patch_macos_dylibs(libs_dir: Path, lib_filenames: list[str]) -> None:
 
 
 def _patch_macos_extension(ext: Path, lib_filenames: list[str], rpaths: list[str]) -> None:
-    """Rewrite an extension's references to bundled dylibs and add RPATHs."""
+    """Strip residual SDK RPATHs, rewrite bundled dylib references, add RPATHs, and re-sign."""
+    _strip_absolute_rpaths(ext)
     linked = _get_linked_libraries(ext)
     for ref in linked:
         if ref.startswith(("@rpath/", "@loader_path/")):
@@ -412,17 +421,23 @@ def _patch_macos_extension(ext: Path, lib_filenames: list[str], rpaths: list[str
     _resign_ad_hoc(ext)
 
 
+def _compute_relative_rpath(depth: int, libs_rel_path: str) -> list[str]:
+    """Compute origin-relative RPATH entries for an artifact at *depth*."""
+    origin = "@loader_path" if sys.platform == "darwin" else "$ORIGIN"
+    rel = libs_rel_path.lstrip("/")
+    if depth <= 0:
+        return [origin, f"{origin}/{rel}"]
+    up = "/".join(".." for _ in range(depth))
+    return [origin, f"{origin}/{up}/{rel}"]
+
+
 def _compute_extension_rpath(module: str, pkg_name: str) -> list[str]:
     """Compute the RPATHs for a python-extension based on its module depth.
 
     ``mogemma._core`` (depth 1) → ``[$ORIGIN, $ORIGIN/../mogemma.libs]``
     ``pkg.sub._core`` (depth 2) → ``[$ORIGIN, $ORIGIN/../../pkg.libs]``
     """
-    origin = "@loader_path" if sys.platform == "darwin" else "$ORIGIN"
-    parts = module.split(".")
-    depth = len(parts) - 1
-    up = "/".join(".." for _ in range(depth))
-    return [origin, f"{origin}/{up}/{pkg_name}.libs"]
+    return _compute_relative_rpath(len(module.split(".")) - 1, f"{pkg_name}.libs")
 
 
 def _patch_rpath(target: Path, rpaths: list[str]) -> None:
@@ -435,6 +450,7 @@ def _patch_rpath(target: Path, rpaths: list[str]) -> None:
                 ["-add_rpath", rpath, str(target)],
                 ignore_errors=["already contains LC_RPATH"],
             )
+        _resign_ad_hoc(target)
     else:
         subprocess.run(
             ["patchelf", "--set-rpath", ":".join(rpaths), str(target)],  # noqa: S607
