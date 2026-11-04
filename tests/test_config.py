@@ -434,3 +434,25 @@ def test_parse_config_skip_editable_and_cache_defaults_and_env_overrides(
     monkeypatch.setenv("HATCH_MOJO_CACHE", "maybe")
     with pytest.raises(ValueError, match="HATCH_MOJO_CACHE"):
         parse_config(raw, target_name="wheel")
+
+
+def test_parse_config_empty_vs_excluded_jobs() -> None:
+    with pytest.raises(ValueError, match="No build jobs resolved"):
+        parse_config({"jobs": []}, target_name="wheel")
+
+    filtered = parse_config(
+        {
+            "exclude": ["src/mo/**/*.mojo"],
+            "jobs": [
+                {
+                    "name": "only",
+                    "input": "src/mo/core.mojo",
+                    "emit": "python-extension",
+                    "module": "pkg._core",
+                }
+            ],
+        },
+        target_name="wheel",
+    )
+    assert filtered.jobs == ()
+    assert filtered.excluded_jobs == ("only",)

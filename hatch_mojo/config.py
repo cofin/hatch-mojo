@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import fnmatch
 import os
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from packaging.markers import Marker
+from pathspec import GitIgnoreSpec
 
 from hatch_mojo.types import EMIT_VALUES, EmitType, InstallKind
 
@@ -51,6 +51,7 @@ class HookConfig:
     exclude: tuple[str, ...]
     targets: tuple[str, ...]
     jobs: tuple[JobConfig, ...]
+    excluded_jobs: tuple[str, ...] = ()
 
 
 def _as_list(value: Any) -> list[str]:
@@ -188,6 +189,13 @@ def _validate_job(name: str, data: dict[str, Any]) -> JobConfig:
     )
 
 
+def matches_filters(rel_posix: str, include: tuple[str, ...], exclude: tuple[str, ...]) -> bool:
+    """Return True when *rel_posix* satisfies git-style *include* and *exclude* globs."""
+    if include and not GitIgnoreSpec.from_lines(include).match_file(rel_posix):
+        return False
+    return not (exclude and GitIgnoreSpec.from_lines(exclude).match_file(rel_posix))
+
+
 def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
     """Parse and validate raw Hatch hook config."""
     raw = raw or {}
@@ -208,6 +216,7 @@ def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
     cache = _env_bool("HATCH_MOJO_CACHE", raw.get("cache"), True)
 
     jobs: list[JobConfig] = []
+    excluded_jobs: list[str] = []
     include = tuple(_as_list(raw.get("include")))
     exclude = tuple(_as_list(raw.get("exclude")))
     for index, job_item in enumerate(jobs_raw):
@@ -223,10 +232,11 @@ def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
         merged = _merge_job_dicts(merged, job_item)
         name = str(merged.get("name") or f"job-{index + 1}")
         job = _validate_job(name, merged)
-        if include and not any(fnmatch.fnmatch(job.input, pattern) for pattern in include):
-            continue
-        if exclude and any(fnmatch.fnmatch(job.input, pattern) for pattern in exclude):
-            continue
+        if not any(ch in job.input for ch in "*?[]"):
+            rel_posix = PurePosixPath(job.input.replace("\\", "/")).as_posix()
+            if not matches_filters(rel_posix, include, exclude):
+                excluded_jobs.append(job.name)
+                continue
         jobs.append(job)
 
     if target_name not in set(_as_list(raw.get("targets")) or ["wheel"]):
@@ -244,9 +254,10 @@ def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
             exclude=exclude,
             targets=tuple(_as_list(raw.get("targets") or ["wheel"])),
             jobs=(),
+            excluded_jobs=(),
         )
 
-    if not jobs:
+    if not jobs_raw:
         raise ValueError("No build jobs resolved from 'jobs'/'sources' configuration")
 
     build_dir = Path(str(raw.get("build-dir") or "build/mojo"))
@@ -264,4 +275,5 @@ def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
         exclude=exclude,
         targets=tuple(_as_list(raw.get("targets") or ["wheel"])),
         jobs=tuple(jobs),
+        excluded_jobs=tuple(excluded_jobs),
     )

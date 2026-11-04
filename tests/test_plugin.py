@@ -51,6 +51,7 @@ def _config(
         mojo_bin=None,
         bundle_libs=bundle_libs,
         cache=cache,
+        excluded_jobs=(),
     )
 
 
