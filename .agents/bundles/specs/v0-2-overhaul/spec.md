@@ -83,15 +83,15 @@ Deliver `hatch-mojo v0.2.0` so Python packages embedding Mojo extensions, shared
 ## Implementation Plan
 
 - [x] [67252d3] mojo-1-2-toolchain — Align compiler CLI (`exe`, `mojoc`), `mojo-compiler` SDK discovery, `win32` stub safety, and `Apache-2.0 WITH LLVM-exception` notices (../mojo-1-2-toolchain/spec.md)
-- [ ] hatchling-lifecycle-and-bundling — Fix `finalize` cleanup, `build-dir`, `shared_scripts`/`shared_data` routing, and `executable`/`shared-lib` runtime bundling (../hatchling-lifecycle-and-bundling/spec.md)
+- [x] [c694718] hatchling-lifecycle-and-bundling — Fix `finalize` cleanup, `build-dir`, `shared_scripts`/`shared_data` routing, and `executable`/`shared-lib` runtime bundling (../hatchling-lifecycle-and-bundling/spec.md)
 - [ ] editable-planner-and-caching — Deliver zero-copy editable installs, profile/glob/DAG planner fixes, `fail-fast = false` filtering, and SHA-256 build caching (../editable-planner-and-caching/spec.md)
 - [ ] wheel-tags-metadata-and-ci — Add `wheel-tag` (`auto`/`infer`/`py3-none`), PEP 639 metadata, `macos-latest` + Python `3.15` CI, and Mojo `1.2` documentation (../wheel-tags-metadata-and-ci/spec.md)
 
 ## Continuity Snapshot
 
 - **Flow ID**: `v0-2-overhaul` (`state: active`, `plan_revision: 3`, `plan_commit: 9782b0b`)
-- **Current Task**: `hatchling-lifecycle-and-bundling`
-- **Last Verified Checkpoint**: `67252d3`
+- **Current Task**: `editable-planner-and-caching`
+- **Last Verified Checkpoint**: `c694718`
 - **Key Decisions**:
   - Replaced unsupported `static-lib` with `mojoc` (`mojo precompile`) and mapped `executable` &rarr; `--emit exe`.
   - Added `wheel-tag = "auto" | "infer" | "py3-none" | "<tag>"` defaulting to `"infer"` for `python-extension` and `"py3-none"` for standalone binaries.

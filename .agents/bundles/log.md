@@ -2,6 +2,7 @@
 
 ## 2026-11-04
 
+- `agent:flow-execution`: Implemented [`specs/hatchling-lifecycle-and-bundling/spec.md`](specs/hatchling-lifecycle-and-bundling/spec.md) (`9f4663f`..`c694718`: `t01`–`t04`) with Phase 1 Recovery Checkpoint verified across 144 passing `pytest` cases and clean `ruff`, `mypy`, `pyright`, and `slotscheck` gates.
 - `agent:flow-execution`: Implemented [`specs/mojo-1-2-toolchain/spec.md`](specs/mojo-1-2-toolchain/spec.md) (`51de4cc`..`67252d3`: `t01`–`t04`) with Phase 1 Recovery Checkpoint verified across 126 passing `pytest` cases and clean `ruff`, `mypy`, `pyright`, and `slotscheck` gates.
 - `agent:plan-generator`: Authored Master PRD [`specs/v0-2-overhaul/spec.md`](specs/v0-2-overhaul/spec.md), promoted [`specs/v0-2-overhaul/research/mojo-packaging-landscape-audit_20261104.md`](specs/v0-2-overhaul/research/mojo-packaging-landscape-audit_20261104.md), and expanded all 4 child flows (`mojo-1-2-toolchain`, `hatchling-lifecycle-and-bundling`, `editable-planner-and-caching`, `wheel-tags-metadata-and-ci`) into 15 zero-decision task worksheets.
 - `agent:researcher`: Added open research audit [`specs/v0-2-overhaul/research/mojo-packaging-landscape-audit_20261104.md`](specs/v0-2-overhaul/research/mojo-packaging-landscape-audit_20261104.md) covering Mojo `0.26.2`–`1.2.0` (`max==26.7.0`), `Apache-2.0 WITH LLVM-exception` open-sourcing, November 2026 packaging tools (`mojo-compiler`, `pixi-build-mojo`, `mohaus`), Hatchling `1.33.0` / `cibuildwheel 4.3.5`, and `hatch-mojo v0.1.8` defects with a targeted `v0.2.0` overhaul recommendation.

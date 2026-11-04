@@ -3,7 +3,7 @@ type: Task
 id: hatchling-lifecycle-and-bundling:t03
 title: "Fix depth-0 RPATH formatting and scope macOS _strip_absolute_rpaths to LC_RPATH across dylibs and extensions"
 description: "Fix depth-0 RPATH double slashes, scope _strip_absolute_rpaths to cmd LC_RPATH blocks, strip absolute RPATHs on macOS extensions, and re-sign _patch_rpath on Darwin."
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -13,19 +13,19 @@ files:
 tests:
   - tests/test_runtime.py
 plan_revision: 3
-plan_commit: null
-state_revision: 0
-claimed_by: null
-claimed_at: null
+plan_commit: 325c734
+state_revision: 2
+claimed_by: agent:executor
+claimed_at: 2026-11-04T19:20:00Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-04T19:25:04Z
+last_verified_commit: 0219211
+verification_evidence: "uv run pytest tests/test_runtime.py -q (62 passed); ruff/mypy/pyright/slotscheck exit 0"
 created_at: 2026-11-04T05:03:00Z
-updated_at: 2026-11-04T06:13:00Z
-commit: null
+updated_at: 2026-11-04T19:25:04Z
+commit: 0219211
 tags: [bugfix, macos, mach-o, rpath, runtime]
 ---
 
@@ -69,10 +69,10 @@ uv run pytest tests/test_runtime.py -q
 
 ## Acceptance Criteria
 
-- [ ] `_compute_extension_rpath("_core", "_core")` emits `["$ORIGIN", "$ORIGIN/_core.libs"]` on Linux and `["@loader_path", "@loader_path/_core.libs"]` on macOS (`R3`).
-- [ ] `_strip_absolute_rpaths` deletes non-`@` paths exclusively from `cmd LC_RPATH` load commands (`R3`, `NRB-03`).
-- [ ] `_patch_macos_extension` strips residual absolute SDK RPATHs prior to adding `@loader_path` RPATHs and re-signing (`R3`, `NRB-01`).
-- [ ] `ruff`, `mypy`, `pyright`, `slotscheck`, and `tests/test_runtime.py` exit `0`.
+- [x] `_compute_extension_rpath("_core", "_core")` emits `["$ORIGIN", "$ORIGIN/_core.libs"]` on Linux and `["@loader_path", "@loader_path/_core.libs"]` on macOS (`R3`).
+- [x] `_strip_absolute_rpaths` deletes non-`@` paths exclusively from `cmd LC_RPATH` load commands (`R3`, `NRB-03`).
+- [x] `_patch_macos_extension` strips residual absolute SDK RPATHs prior to adding `@loader_path` RPATHs and re-signing (`R3`, `NRB-01`).
+- [x] `ruff`, `mypy`, `pyright`, `slotscheck`, and `tests/test_runtime.py` exit `0`.
 
 ## Notes & Discoveries
 

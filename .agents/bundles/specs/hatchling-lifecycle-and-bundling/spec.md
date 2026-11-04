@@ -3,17 +3,17 @@ type: Spec
 flow_id: hatchling-lifecycle-and-bundling
 title: "Hatchling 1.33 Lifecycle, Artifact Routing & Full Binary Bundling"
 description: "Fix MojoBuildHook.finalize cleanup, build-dir propagation, shared_scripts/shared_data routing, Mach-O RPATH stripping, and executable/shared-lib runtime bundling."
-state: planned
+state: completed
 parent_prd: v0-2-overhaul
 research:
   - ../v0-2-overhaul/research/mojo-packaging-landscape-audit_20261104.md
 plan_revision: 3
-plan_commit: null
-state_revision: 0
+plan_commit: 325c734
+state_revision: 5
 current_task: null
-last_verified_checkpoint: null
+last_verified_checkpoint: c694718
 created_at: 2026-11-04T05:03:00Z
-updated_at: 2026-11-04T06:04:00Z
+updated_at: 2026-11-04T19:35:00Z
 tags: [bugfix, hatchling, lifecycle, artifacts, runtime]
 ---
 
@@ -100,16 +100,16 @@ tags: [bugfix, hatchling, lifecycle, artifacts, runtime]
 ## 4. Implementation Plan
 
 ### Phase 1: Hatchling Lifecycle, Routing & Full Binary Bundling
-- [ ] t01 — Propagate `config.build_dir`, prune manifest directories, and move `clean-after-build` to `MojoBuildHook.finalize` (tasks/t01-build-dir-and-manifest-lifecycle.md)
-- [ ] t02 — Route `scripts` and `data` jobs to Hatchling `shared_scripts` / `shared_data` and update dependency floors (tasks/t02-shared-scripts-and-data-routing.md)
-- [ ] t03 — Fix depth-0 RPATH formatting and scope macOS `_strip_absolute_rpaths` to `LC_RPATH` across dylibs and extensions (tasks/t03-macos-rpath-and-top-level-hardening.md)
-- [ ] t04 — Extend `bundle_runtime_libs` (`RuntimeBundleResult`) to `executable` and `shared-lib` jobs across `platlib` and `.data` layouts (tasks/t04-non-extension-runtime-bundling.md)
+- [x] [9f4663f] t01 — Propagate `config.build_dir`, prune manifest directories, and move `clean-after-build` to `MojoBuildHook.finalize` (tasks/t01-build-dir-and-manifest-lifecycle.md)
+- [x] [25e92d4] t02 — Route `scripts` and `data` jobs to Hatchling `shared_scripts` / `shared_data` and update dependency floors (tasks/t02-shared-scripts-and-data-routing.md)
+- [x] [0219211] t03 — Fix depth-0 RPATH formatting and scope macOS `_strip_absolute_rpaths` to `LC_RPATH` across dylibs and extensions (tasks/t03-macos-rpath-and-top-level-hardening.md)
+- [x] [c694718] t04 — Extend `bundle_runtime_libs` (`RuntimeBundleResult`) to `executable` and `shared-lib` jobs across `platlib` and `.data` layouts (tasks/t04-non-extension-runtime-bundling.md)
 - **Phase 1 Recovery Checkpoint**: `uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run pyright && uv run slotscheck hatch_mojo && uv run pytest -q`
 
 ## 5. Continuity Snapshot
-- **Flow ID**: `hatchling-lifecycle-and-bundling` (`state: planned`, `plan_revision: 3`, `plan_commit: null`)
+- **Flow ID**: `hatchling-lifecycle-and-bundling` (`state: completed`, `plan_revision: 3`, `plan_commit: 325c734`)
 - **Current Task**: `null`
-- **Last Verified Checkpoint**: `null`
+- **Last Verified Checkpoint**: `c694718`
 - **Key Decisions**:
   - `MojoBuildHook.finalize` owns `clean-after-build` execution after `WheelBuilder` finishes archiving.
   - `RuntimeBundleResult` separates `force_include` (`platlib`) and `shared_data` (`<prefix>/lib/<dist>.libs/`) cleanly without leaking `build_data` into `runtime.py`.

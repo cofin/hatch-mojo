@@ -3,7 +3,7 @@ type: Task
 id: hatchling-lifecycle-and-bundling:t04
 title: "Extend bundle_runtime_libs (RuntimeBundleResult) to executable and shared-lib jobs across platlib and .data layouts"
 description: "Introduce RuntimeBundleResult and bundle Modular runtime libraries with relative RPATHs for python-extension, shared-lib, and executable jobs across platlib and shared_data."
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -17,19 +17,19 @@ tests:
   - tests/test_plugin.py
   - tests/test_integration_wheel.py
 plan_revision: 3
-plan_commit: null
-state_revision: 0
-claimed_by: null
-claimed_at: null
+plan_commit: 325c734
+state_revision: 2
+claimed_by: agent:executor
+claimed_at: 2026-11-04T19:25:10Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-04T19:34:19Z
+last_verified_commit: c694718
+verification_evidence: "uv run pytest -q (144 passed); ruff/mypy/pyright/slotscheck exit 0"
 created_at: 2026-11-04T05:03:00Z
-updated_at: 2026-11-04T06:13:00Z
-commit: null
+updated_at: 2026-11-04T19:34:19Z
+commit: c694718
 tags: [feature, runtime, bundling, executable, rpath]
 ---
 
@@ -81,10 +81,10 @@ uv run pytest -q
 
 ## Acceptance Criteria
 
-- [ ] `RuntimeBundleResult` is `@dataclass(slots=True, frozen=True)` and passes `slotscheck` (`R4`, `HBP-01`).
-- [ ] `bundle_runtime_libs` stages and patches `python-extension`, `shared-lib`, and `executable` outputs across `platlib` (`force_include`) and `.data` (`shared_data`) layouts on Linux and macOS (`R4`, `NRB-01`..`NRB-07`).
-- [ ] `object` and `mojoc` jobs are excluded from dynamic library bundling (`R4`).
-- [ ] Full static analysis and `pytest` suite exit `0`.
+- [x] `RuntimeBundleResult` is `@dataclass(slots=True, frozen=True)` and passes `slotscheck` (`R4`, `HBP-01`).
+- [x] `bundle_runtime_libs` stages and patches `python-extension`, `shared-lib`, and `executable` outputs across `platlib` (`force_include`) and `.data` (`shared_data`) layouts on Linux and macOS (`R4`, `NRB-01`..`NRB-07`).
+- [x] `object` and `mojoc` jobs are excluded from dynamic library bundling (`R4`).
+- [x] Full static analysis and `pytest` suite exit `0`.
 
 ## Notes & Discoveries
 

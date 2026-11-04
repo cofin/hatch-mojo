@@ -3,7 +3,7 @@ type: Task
 id: hatchling-lifecycle-and-bundling:t02
 title: "Route scripts and data jobs to Hatchling shared_scripts / shared_data and update dependency floors"
 description: "Route scripts/data jobs via resolve_install_target, enable bypass-selection for zero-Python wheels, and upgrade Hatchling/packaging floors in pyproject.toml and uv.lock."
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -18,19 +18,19 @@ tests:
   - tests/test_plugin.py
   - tests/test_integration_wheel.py
 plan_revision: 3
-plan_commit: null
-state_revision: 0
-claimed_by: null
-claimed_at: null
+plan_commit: 325c734
+state_revision: 2
+claimed_by: agent:executor
+claimed_at: 2026-11-04T18:48:00Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-04T19:19:28Z
+last_verified_commit: 25e92d4
+verification_evidence: "uv run pytest tests/test_artifacts.py tests/test_plugin.py tests/test_integration_wheel.py -q (22 passed); ruff/mypy/pyright/slotscheck exit 0"
 created_at: 2026-11-04T05:03:00Z
-updated_at: 2026-11-04T06:04:00Z
-commit: null
+updated_at: 2026-11-04T19:19:28Z
+commit: 25e92d4
 tags: [bugfix, hatchling, artifacts, scripts, wheel]
 ---
 
@@ -86,10 +86,10 @@ uv run pytest tests/test_artifacts.py tests/test_integration_wheel.py -q
 
 ## Acceptance Criteria
 
-- [ ] `pyproject.toml` specifies `dependencies = ["hatchling>=1.31.0,!=1.32.3", "packaging>=24.2"]` (`R2`).
-- [ ] `register_artifacts` routes `scripts` to `build_data["shared_scripts"]` and `data` to `build_data["shared_data"]`, placing CLI executables at `<dist>-<ver>.data/scripts/<name>` (`R2`).
-- [ ] `resolve_install_target(job)` handles paths outside `root` without `ValueError` (`R2`).
-- [ ] `ruff`, `mypy`, `pyright`, `slotscheck`, and focused `pytest` modules exit `0`.
+- [x] `pyproject.toml` specifies `dependencies = ["hatchling>=1.31.0,!=1.32.3", "packaging>=24.2"]` (`R2`).
+- [x] `register_artifacts` routes `scripts` to `build_data["shared_scripts"]` and `data` to `build_data["shared_data"]`, placing CLI executables at `<dist>-<ver>.data/scripts/<name>` (`R2`).
+- [x] `resolve_install_target(job)` handles paths outside `root` without `ValueError` (`R2`).
+- [x] `ruff`, `mypy`, `pyright`, `slotscheck`, and focused `pytest` modules exit `0`.
 
 ## Notes & Discoveries
 
