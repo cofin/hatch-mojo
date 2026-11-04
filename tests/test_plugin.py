@@ -88,19 +88,30 @@ def test_initialize_serial_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_args, **_kwargs: "mojo")
 
     seq: list[str] = []
+    saved_manifests: list[tuple[str, list[Path]]] = []
+
+    def _record_save(root: Path, build_dir: str, outputs: list[Path], *, filename: str = "manifest.json") -> Path:
+        seq.append("save")
+        saved_manifests.append((filename, list(outputs)))
+        return root / build_dir / filename
+
     monkeypatch.setattr("hatch_mojo.plugin.clean_from_manifest", lambda *_args, **_kwargs: seq.append("clean"))
     monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kwargs: (True, "ok"))
-    monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.bundle_runtime_libs",
+        lambda **_kwargs: {str(tmp_path / "staged.so"): "pkg.libs/libFoo.so"},
+    )
     monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: seq.append("register"))
-    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_args, **_kwargs: seq.append("save"))
+    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", _record_save)
 
     build_data: dict[str, Any] = {}
     MojoBuildHook.initialize(cast("Any", fake), "standard", build_data)
     assert "ok" in debugs
     assert warnings == []
-    assert seq.count("clean") == 2
+    assert seq.count("clean") == 1
     assert "register" in seq
     assert "save" in seq
+    assert saved_manifests == [("manifest.json", [job.output_path, tmp_path / "staged.so"])]
 
 
 def test_initialize_parallel_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -179,18 +190,25 @@ def test_initialize_editable_copies_artifacts(monkeypatch: pytest.MonkeyPatch, t
     debugs: list[str] = []
     app = SimpleNamespace(display_warning=warnings.append, display_debug=debugs.append)
     fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app)
+    saved_manifests: list[tuple[str, list[Path]]] = []
+
+    def _record_save(root: Path, build_dir: str, outputs: list[Path], *, filename: str = "manifest.json") -> Path:
+        saved_manifests.append((filename, list(outputs)))
+        return root / build_dir / filename
+
     monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_args, **_kwargs: cfg)
     monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_args, **_kwargs: [job])
     monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_args, **_kwargs: "mojo")
     monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kwargs: (True, "ok"))
     monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", lambda **_kwargs: {})
     monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: None)
-    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", _record_save)
 
     MojoBuildHook.initialize(cast("Any", fake), "editable", {})
     copied = pkg_dir / "_core.so"
     assert copied.exists()
     assert copied.read_text(encoding="utf-8") == "fake-binary"
+    assert ("editable-manifest.json", [copied]) in saved_manifests
 
 
 def test_initialize_calls_bundle_when_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -248,7 +266,58 @@ def test_initialize_skips_bundle_when_disabled(monkeypatch: pytest.MonkeyPatch, 
 def test_clean_calls_clean_from_manifest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel")
     monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_args, **_kwargs: _config())
-    called: list[str] = []
-    monkeypatch.setattr("hatch_mojo.plugin.clean_from_manifest", lambda *_args, **_kwargs: called.append("clean"))
+    called: list[bool] = []
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.clean_from_manifest",
+        lambda *_args, include_editable=False, **_kwargs: called.append(include_editable),
+    )
     MojoBuildHook.clean(cast("Any", fake), ["wheel"])
-    assert called == ["clean"]
+    assert called == [True]
+
+
+def test_finalize_runs_clean_when_clean_after_build_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel")
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.parse_config",
+        lambda *_args, **_kwargs: _config(clean_after=True),
+    )
+    calls: list[tuple[Path, str, bool]] = []
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.clean_from_manifest",
+        lambda root, build_dir, *, include_editable=False: calls.append((root, build_dir, include_editable)),
+    )
+    MojoBuildHook.finalize(cast("Any", fake), "standard", {}, "dist/pkg.whl")
+    assert calls == [(tmp_path, "build/mojo", False)]
+
+
+def test_finalize_skips_editable_even_when_clean_after_build_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel")
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.parse_config",
+        lambda *_args, **_kwargs: _config(clean_after=True),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr("hatch_mojo.plugin.clean_from_manifest", lambda *_a, **_kw: calls.append("clean"))
+    MojoBuildHook.finalize(cast("Any", fake), "editable", {}, "dist/pkg.whl")
+    assert calls == []
+
+
+def test_finalize_noop_when_clean_after_build_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel")
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.parse_config",
+        lambda *_args, **_kwargs: _config(clean_after=False),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr("hatch_mojo.plugin.clean_from_manifest", lambda *_a, **_kw: calls.append("clean"))
+    MojoBuildHook.finalize(cast("Any", fake), "standard", {}, "dist/pkg.whl")
+    assert calls == []

@@ -49,13 +49,13 @@ def _get_suffix_map() -> dict[str, str]:
     }
 
 
-def _default_output(root: Path, job: JobConfig, input_path: Path) -> Path:
+def _default_output(root: Path, build_dir: str, job: JobConfig, input_path: Path) -> Path:
+    """Resolve the default output artifact path under *build_dir* for *job*."""
     suffix = _get_suffix_map()[job.emit]
     if job.emit == "python-extension" and job.module:
-        # mogemma._core -> build/mojo/mogemma/_core.so
         parts = job.module.split(".")
-        return root / "build/mojo" / Path(*parts).with_suffix(suffix)
-    return root / "build/mojo" / f"{input_path.stem}{suffix}"
+        return root / build_dir / Path(*parts).with_suffix(suffix)
+    return root / build_dir / f"{input_path.stem}{suffix}"
 
 
 def _expand_inputs(root: Path, pattern: str) -> list[Path]:
@@ -125,7 +125,9 @@ def _expand_all_jobs(root: Path, config: HookConfig) -> list[BuildJob]:
         if not input_paths:
             raise ValueError(f"No input files resolved for job '{job.name}' pattern '{job.input}'")
         for index, input_path in enumerate(input_paths, start=1):
-            output_path = (root / job.output) if job.output else _default_output(root, job, input_path)
+            output_path = (
+                (root / job.output) if job.output else _default_output(root, config.build_dir, job, input_path)
+            )
             concrete_name = job.name if len(input_paths) == 1 else f"{job.name}[{index}]"
             if any(existing.name == concrete_name for existing in jobs):
                 raise ValueError(f"Duplicate concrete job name '{concrete_name}'")

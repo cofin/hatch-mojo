@@ -10,7 +10,7 @@ from typing import Any
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
 from hatch_mojo.artifacts import register_artifacts
-from hatch_mojo.cleaning import clean_from_manifest, save_manifest
+from hatch_mojo.cleaning import EDITABLE_MANIFEST_NAME, clean_from_manifest, save_manifest
 from hatch_mojo.compiler import compile_job, discover_mojo
 from hatch_mojo.config import parse_config
 from hatch_mojo.planner import plan_jobs, plan_jobs_leveled
@@ -20,8 +20,9 @@ from hatch_mojo.types import BuildJob
 _SOURCE_LAYOUTS = ("", "src", "src/py")
 
 
-def _copy_editable_artifacts(root: Path, jobs: list[BuildJob]) -> None:
+def _copy_editable_artifacts(root: Path, jobs: list[BuildJob]) -> list[Path]:
     """Copy built python-extension artifacts into the source tree for editable installs."""
+    copied: list[Path] = []
     for job in jobs:
         if job.emit != "python-extension" or not job.module:
             continue
@@ -36,7 +37,9 @@ def _copy_editable_artifacts(root: Path, jobs: list[BuildJob]) -> None:
                 dest = pkg_dir / rel_path
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(job.output_path, dest)
+                copied.append(dest)
                 break
+    return copied
 
 
 class MojoBuildHook(BuildHookInterface[Any]):
@@ -53,7 +56,7 @@ class MojoBuildHook(BuildHookInterface[Any]):
         if not config.jobs:
             return
         if config.clean_before_build:
-            clean_from_manifest(root, config.build_dir)
+            clean_from_manifest(root, config.build_dir, include_editable=(version == "editable"))
 
         if config.parallel:
             levels = plan_jobs_leveled(root, config)
@@ -104,6 +107,7 @@ class MojoBuildHook(BuildHookInterface[Any]):
                 else:
                     self.app.display_debug(log)
 
+        manifest_files: list[Path] = [job.output_path for job in planned]
         if config.bundle_libs:
             bundled = bundle_runtime_libs(
                 root=root,
@@ -112,17 +116,24 @@ class MojoBuildHook(BuildHookInterface[Any]):
                 mojo_bin=mojo_bin,
             )
             build_data.setdefault("force_include", {}).update(bundled)
+            manifest_files.extend(Path(path_str) for path_str in bundled)
 
         register_artifacts(root=root, build_data=build_data, jobs=planned, target_name=self.target_name)
-        save_manifest(root, config.build_dir, [job.output_path for job in planned])
+        save_manifest(root, config.build_dir, manifest_files)
 
         if version == "editable":
-            _copy_editable_artifacts(root, planned)
+            editable_files = _copy_editable_artifacts(root, planned)
+            if editable_files:
+                save_manifest(root, config.build_dir, editable_files, filename=EDITABLE_MANIFEST_NAME)
 
-        if config.clean_after_build:
-            clean_from_manifest(root, config.build_dir)
+    def finalize(self, version: str, build_data: dict[str, Any], artifact_path: str) -> None:
+        if version == "editable":
+            return
+        config = parse_config(self.config, target_name=self.target_name)
+        if config.jobs and config.clean_after_build:
+            clean_from_manifest(Path(self.root), config.build_dir, include_editable=False)
 
     def clean(self, versions: list[str]) -> None:
         root = Path(self.root)
         config = parse_config(self.config, target_name=self.target_name)
-        clean_from_manifest(root, config.build_dir)
+        clean_from_manifest(root, config.build_dir, include_editable=True)

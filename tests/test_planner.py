@@ -198,6 +198,37 @@ def test_plan_jobs_mojoc_default_output(tmp_path: Path) -> None:
     assert jobs[0].output_path == tmp_path / "build/mojo/core.mojoc"
 
 
+def test_custom_build_dir_default_output(tmp_path: Path) -> None:
+    (tmp_path / "src/mo").mkdir(parents=True)
+    (tmp_path / "src/mo/core.mojo").write_text("", encoding="utf-8")
+    (tmp_path / "src/mo/tool.mojo").write_text("", encoding="utf-8")
+    config = parse_config(
+        {
+            "build-dir": "build/custom_mojo",
+            "jobs": [
+                {
+                    "name": "core",
+                    "input": "src/mo/core.mojo",
+                    "emit": "python-extension",
+                    "module": "mogemma._core",
+                },
+                {
+                    "name": "tool",
+                    "input": "src/mo/tool.mojo",
+                    "emit": "mojoc",
+                    "install": {"kind": "package", "path": "mogemma"},
+                },
+            ],
+        },
+        target_name="wheel",
+    )
+    jobs = plan_jobs(tmp_path, config)
+    by_name = {job.name: job for job in jobs}
+    suffix = _get_suffix_map()["python-extension"]
+    assert by_name["core"].output_path == tmp_path / "build/custom_mojo/mogemma" / f"_core{suffix}"
+    assert by_name["tool"].output_path == tmp_path / "build/custom_mojo/tool.mojoc"
+
+
 def test_module_aware_default_output(tmp_path: Path) -> None:
     (tmp_path / "src/mo").mkdir(parents=True)
     (tmp_path / "src/mo/core.mojo").write_text("", encoding="utf-8")
