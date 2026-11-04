@@ -26,7 +26,7 @@ from hatch_mojo.runtime import (
     bundle_runtime_libs,
     discover_modular_lib,
 )
-from hatch_mojo.types import BuildJob
+from hatch_mojo.types import BuildJob, RuntimeBundleResult
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -351,26 +351,40 @@ def test_patch_rpath_windows_noop(tmp_path: Path) -> None:
 def test_bundle_skips_on_windows(tmp_path: Path) -> None:
     with patch.object(sys, "platform", "win32"):
         result = bundle_runtime_libs(tmp_path, "build/mojo", [], None)
-        assert result == {}
+        assert result == RuntimeBundleResult(force_include={}, shared_data={}, staged_files=())
 
 
 def test_bundle_skips_no_ext_jobs(tmp_path: Path) -> None:
-    non_ext = BuildJob(
-        name="lib",
-        input_path=tmp_path / "lib.mojo",
-        output_path=tmp_path / "lib.so",
-        emit="shared-lib",
+    obj_job = BuildJob(
+        name="obj",
+        input_path=tmp_path / "obj.mojo",
+        output_path=tmp_path / "obj.o",
+        emit="object",
         module=None,
         install_kind="force-include",
-        install_path="lib/",
+        install_path="lib/obj.o",
         include_dirs=(),
         defines=(),
         flags=(),
         env={},
         depends_on=(),
     )
-    result = bundle_runtime_libs(tmp_path, "build/mojo", [non_ext], None)
-    assert result == {}
+    mojoc_job = BuildJob(
+        name="pkg",
+        input_path=tmp_path / "pkg.mojo",
+        output_path=tmp_path / "pkg.mojoc",
+        emit="mojoc",
+        module=None,
+        install_kind="package",
+        install_path="mypkg",
+        include_dirs=(),
+        defines=(),
+        flags=(),
+        env={},
+        depends_on=(),
+    )
+    result = bundle_runtime_libs(tmp_path, "build/mojo", [obj_job, mojoc_job], None)
+    assert result == RuntimeBundleResult(force_include={}, shared_data={}, staged_files=())
 
 
 def test_bundle_full_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -391,14 +405,16 @@ def test_bundle_full_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     ):
         result = bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
 
-    assert len(result) == 4  # 3 fake libs + 1 NOTICE
+    assert len(result.force_include) == 4
+    assert result.shared_data == {}
+    assert len(result.staged_files) == 4
     libs_dir = tmp_path / "build" / "mojo" / "mogemma.libs"
     assert libs_dir.is_dir()
 
     for base in ["KGENCompilerRTShared", "AsyncRTRuntimeGlobals", "MSupportGlobals"]:
         filename = f"lib{base}.so"
         assert (libs_dir / filename).exists()
-        assert any(v == f"mogemma.libs/{filename}" for v in result.values())
+        assert any(v == f"mogemma.libs/{filename}" for v in result.force_include.values())
 
 
 def test_bundle_multiple_packages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -419,9 +435,10 @@ def test_bundle_multiple_packages(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     ):
         result = bundle_runtime_libs(tmp_path, "build/mojo", [job_a, job_b], None)
 
-    assert len(result) == 8  # 4 files per pkg
-    assert any("pkga.libs/" in v for v in result.values())
-    assert any("pkgb.libs/" in v for v in result.values())
+    assert len(result.force_include) == 8
+    assert len(result.staged_files) == 8
+    assert any("pkga.libs/" in v for v in result.force_include.values())
+    assert any("pkgb.libs/" in v for v in result.force_include.values())
 
 
 def test_bundle_raises_on_missing_runtime_lib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -528,6 +545,23 @@ def test_get_linked_libraries_parses_ldd_output(tmp_path: Path) -> None:
     assert libs == [
         "/opt/modular/lib/libKGENCompilerRTShared.so",
         "/lib64/ld-linux-x86-64.so.2",
+    ]
+
+
+def test_get_linked_libraries_ldd_not_found_soname(tmp_path: Path) -> None:
+    ldd_output = (
+        "\tlinux-vdso.so.1 (0x00007fffa)\n"
+        "\tlibAsyncRTMojoBindings.so => not found\n"
+        "\tlibKGENCompilerRTShared.so => /opt/modular/lib/libKGENCompilerRTShared.so (0x00007fffb)\n"
+    )
+    mock_result = SimpleNamespace(stdout=ldd_output)
+    target = tmp_path / "test.so"
+    target.write_bytes(b"")
+    with patch("sys.platform", "linux"), patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result):
+        libs = _get_linked_libraries(target)
+    assert libs == [
+        "libAsyncRTMojoBindings.so",
+        "/opt/modular/lib/libKGENCompilerRTShared.so",
     ]
 
 
@@ -1107,15 +1141,12 @@ def test_bundle_includes_license_notice(tmp_path: Path, monkeypatch: pytest.Monk
     ):
         result = bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
 
-    assert any(v == "mogemma.libs/NOTICE.mojo-runtime" for v in result.values())
+    assert any(v == "mogemma.libs/NOTICE.mojo-runtime" for v in result.force_include.values())
     notice_path = tmp_path / "build" / "mojo" / "mogemma.libs" / "NOTICE.mojo-runtime"
     assert notice_path.exists()
     content = notice_path.read_text()
     for base in ["KGENCompilerRTShared", "AsyncRTRuntimeGlobals", "MSupportGlobals"]:
         assert _lib_filename(base) in content
-
-
-# ── bundle_runtime_libs: macOS full flow ───────────────────────────────────
 
 
 def test_bundle_full_flow_darwin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1124,14 +1155,12 @@ def test_bundle_full_flow_darwin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     def mock_resolve_darwin(target: Path, modular_lib: Path) -> set[str]:
         return {"libKGENCompilerRTShared.dylib", "libAsyncRTRuntimeGlobals.dylib", "libMSupportGlobals.dylib"}
 
-    # Mock otool to return empty deps (simplifies assertions)
     mock_result = SimpleNamespace(stdout="/path/to/lib:\n")
     with (
         patch.object(sys, "platform", "darwin"),
         patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result),
         patch("hatch_mojo.runtime._resolve_modular_dependencies", side_effect=mock_resolve_darwin),
     ):
-        # Create modular lib dir inside mock so _sentinel() returns .dylib
         modular = tmp_path / "modular"
         _make_modular_lib(modular)
         lib_dir = modular / "lib"
@@ -1140,14 +1169,154 @@ def test_bundle_full_flow_darwin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         job = _ext_job(tmp_path, module="mogemma._core")
         result = bundle_runtime_libs(tmp_path, "build/mojo", [job], None)
 
-    assert len(result) == 4  # 3 fake libs + 1 NOTICE
+    assert len(result.force_include) == 4
     libs_dir = tmp_path / "build" / "mojo" / "mogemma.libs"
     assert libs_dir.is_dir()
 
     for base in ["KGENCompilerRTShared", "AsyncRTRuntimeGlobals", "MSupportGlobals"]:
         filename = f"lib{base}.dylib"
         assert (libs_dir / filename).exists()
-        assert any(v == f"mogemma.libs/{filename}" for v in result.values())
+        assert any(v == f"mogemma.libs/{filename}" for v in result.force_include.values())
+
+
+def test_bundle_scripts_and_data_executables_linux(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    modular = tmp_path / "modular"
+    _make_modular_lib(modular)
+    monkeypatch.setenv("MODULAR_LIB_DIR", str(modular / "lib"))
+
+    cli_bin = tmp_path / "build/mojo/my-cli"
+    cli_sub = tmp_path / "build/mojo/sub-cli"
+    data_bin = tmp_path / "build/mojo/tool"
+    cli_bin.parent.mkdir(parents=True, exist_ok=True)
+    for target in (cli_bin, cli_sub, data_bin):
+        target.write_bytes(b"elf")
+
+    jobs = [
+        BuildJob("cli1", tmp_path / "a.mojo", cli_bin, "executable", None, "scripts", "my-cli", (), (), (), {}, ()),
+        BuildJob("cli2", tmp_path / "b.mojo", cli_sub, "executable", None, "scripts", "sub/my-cli", (), (), (), {}, ()),
+        BuildJob("dat", tmp_path / "c.mojo", data_bin, "executable", None, "data", "share/sub/", (), (), (), {}, ()),
+    ]
+
+    with (
+        patch.object(sys, "platform", "linux"),
+        patch("hatch_mojo.runtime.subprocess.run") as mock_run,
+        patch(
+            "hatch_mojo.runtime._resolve_modular_dependencies",
+            return_value={"libKGENCompilerRTShared.so"},
+        ),
+    ):
+        result = bundle_runtime_libs(tmp_path, "build/mojo", jobs, None, dist_name="My-Pkg")
+
+    assert result.force_include == {}
+    assert "lib/my_pkg.libs/libKGENCompilerRTShared.so" in result.shared_data.values()
+    assert "lib/my_pkg.libs/NOTICE.mojo-runtime" in result.shared_data.values()
+    staged_dir = tmp_path / "build" / "mojo" / "shared" / "my_pkg.libs"
+    assert (staged_dir / "libKGENCompilerRTShared.so") in result.staged_files
+    assert (staged_dir / "NOTICE.mojo-runtime") in result.staged_files
+
+    patchelf_calls = {c.args[0][3]: c.args[0][2] for c in mock_run.call_args_list if c.args[0][0] == "patchelf"}
+    assert patchelf_calls[str(cli_bin)] == "$ORIGIN:$ORIGIN/../lib/my_pkg.libs"
+    assert patchelf_calls[str(cli_sub)] == "$ORIGIN:$ORIGIN/../../lib/my_pkg.libs"
+    assert patchelf_calls[str(data_bin)] == "$ORIGIN:$ORIGIN/../../lib/my_pkg.libs"
+
+
+def test_bundle_shared_lib_package_and_root_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    modular = tmp_path / "modular"
+    _make_modular_lib(modular)
+    monkeypatch.setenv("MODULAR_LIB_DIR", str(modular / "lib"))
+
+    pkg_lib = tmp_path / "build/mojo/libpkg.so"
+    root_lib = tmp_path / "build/mojo/libfoo.so"
+    pkg_lib.parent.mkdir(parents=True, exist_ok=True)
+    pkg_lib.write_bytes(b"elf")
+    root_lib.write_bytes(b"elf")
+
+    jobs = [
+        BuildJob(
+            "pkglib",
+            tmp_path / "a.mojo",
+            pkg_lib,
+            "shared-lib",
+            None,
+            "package",
+            "my_pkg/native",
+            (),
+            (),
+            (),
+            {},
+            (),
+        ),
+        BuildJob("rootlib", tmp_path / "b.mojo", root_lib, "shared-lib", None, "root", "libfoo.so", (), (), (), {}, ()),
+    ]
+
+    with (
+        patch.object(sys, "platform", "linux"),
+        patch("hatch_mojo.runtime.subprocess.run") as mock_run,
+        patch(
+            "hatch_mojo.runtime._resolve_modular_dependencies",
+            return_value={"libKGENCompilerRTShared.so"},
+        ),
+    ):
+        result = bundle_runtime_libs(tmp_path, "build/mojo", jobs, None, dist_name=None)
+
+    assert "my_pkg.libs/libKGENCompilerRTShared.so" in result.force_include.values()
+    assert "mojo_runtime.libs/libKGENCompilerRTShared.so" in result.force_include.values()
+    assert result.shared_data == {}
+
+    patchelf_calls = {c.args[0][3]: c.args[0][2] for c in mock_run.call_args_list if c.args[0][0] == "patchelf"}
+    assert patchelf_calls[str(pkg_lib)] == "$ORIGIN:$ORIGIN/../../my_pkg.libs"
+    assert patchelf_calls[str(root_lib)] == "$ORIGIN:$ORIGIN/mojo_runtime.libs"
+
+
+def test_bundle_darwin_shared_lib_and_scripts_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with patch.object(sys, "platform", "darwin"):
+        modular = tmp_path / "modular"
+        _make_modular_lib(modular)
+        monkeypatch.setenv("MODULAR_LIB_DIR", str(modular / "lib"))
+
+        shlib = tmp_path / "build/mojo/libfoo.dylib"
+        cli = tmp_path / "build/mojo/my-cli"
+        shlib.parent.mkdir(parents=True, exist_ok=True)
+        shlib.write_bytes(b"macho")
+        cli.write_bytes(b"macho")
+
+        jobs = [
+            BuildJob(
+                "shlib",
+                tmp_path / "a.mojo",
+                shlib,
+                "shared-lib",
+                None,
+                "package",
+                "my_pkg/native",
+                (),
+                (),
+                (),
+                {},
+                (),
+            ),
+            BuildJob("cli", tmp_path / "b.mojo", cli, "executable", None, "scripts", "my-cli", (), (), (), {}, ()),
+        ]
+
+        mock_result = SimpleNamespace(stdout="/path:\n")
+        with (
+            patch("hatch_mojo.runtime.subprocess.run", return_value=mock_result) as mock_run,
+            patch(
+                "hatch_mojo.runtime._resolve_modular_dependencies",
+                return_value={"libKGENCompilerRTShared.dylib"},
+            ),
+        ):
+            result = bundle_runtime_libs(tmp_path, "build/mojo", jobs, None, dist_name="My-Pkg")
+
+    assert "my_pkg.libs/libKGENCompilerRTShared.dylib" in result.force_include.values()
+    assert "lib/my_pkg.libs/libKGENCompilerRTShared.dylib" in result.shared_data.values()
+
+    arg_lists = [c.args[0] for c in mock_run.call_args_list]
+    assert ["install_name_tool", "-id", "@rpath/libfoo.dylib", str(shlib)] in arg_lists
+    assert ["install_name_tool", "-add_rpath", "@loader_path/../../my_pkg.libs", str(shlib)] in arg_lists
+    assert ["install_name_tool", "-add_rpath", "@loader_path/../lib/my_pkg.libs", str(cli)] in arg_lists
+    assert ["codesign", "-s", "-", "-f", str(shlib)] in arg_lists
+    assert ["codesign", "-s", "-", "-f", str(cli)] in arg_lists
 
 
 # ── test helpers ───────────────────────────────────────────────────────────

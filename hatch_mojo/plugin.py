@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -42,6 +43,73 @@ def _copy_editable_artifacts(root: Path, jobs: list[BuildJob]) -> list[Path]:
     return copied
 
 
+def _resolve_dist_name(hook: Any) -> str | None:
+    """Extract the distribution name from Hatchling metadata when available."""
+    with contextlib.suppress(AttributeError, ValueError):
+        core_name = hook.metadata.core.name
+        if isinstance(core_name, str) and core_name:
+            return core_name
+    with contextlib.suppress(AttributeError, ValueError):
+        meta_name = hook.metadata.name
+        if isinstance(meta_name, str) and meta_name:
+            return meta_name
+    return None
+
+
+def _compile_planned_jobs(app: Any, root: Path, config: Any) -> tuple[list[BuildJob], str | None]:
+    """Plan and execute build jobs serially or across topological DAG levels."""
+    if config.parallel:
+        levels = plan_jobs_leveled(root, config)
+        planned = [job for level in levels for job in level]
+        if not planned:
+            return [], None
+        mojo_bin = discover_mojo(root, config.mojo_bin)
+        for level in levels:
+            if len(level) > 1:
+                with ThreadPoolExecutor() as pool:
+                    futures = [
+                        pool.submit(
+                            compile_job,
+                            mojo_bin=mojo_bin,
+                            root=root,
+                            job=job,
+                            fail_fast=config.fail_fast,
+                        )
+                        for job in level
+                    ]
+                    for future in futures:
+                        success, log = future.result()
+                        if not success:
+                            app.display_warning(log)
+                        else:
+                            app.display_debug(log)
+            else:
+                for job in level:
+                    success, log = compile_job(mojo_bin=mojo_bin, root=root, job=job, fail_fast=config.fail_fast)
+                    if not success:
+                        app.display_warning(log)
+                    else:
+                        app.display_debug(log)
+        return planned, mojo_bin
+
+    planned = plan_jobs(root, config)
+    if not planned:
+        return [], None
+    mojo_bin = discover_mojo(root, config.mojo_bin)
+    for job in planned:
+        success, log = compile_job(
+            mojo_bin=mojo_bin,
+            root=root,
+            job=job,
+            fail_fast=config.fail_fast,
+        )
+        if not success:
+            app.display_warning(log)
+        else:
+            app.display_debug(log)
+    return planned, mojo_bin
+
+
 class MojoBuildHook(BuildHookInterface[Any]):
     """Compile Mojo sources and register artifacts for Hatch builds."""
 
@@ -58,54 +126,9 @@ class MojoBuildHook(BuildHookInterface[Any]):
         if config.clean_before_build:
             clean_from_manifest(root, config.build_dir, include_editable=(version == "editable"))
 
-        if config.parallel:
-            levels = plan_jobs_leveled(root, config)
-            planned = [job for level in levels for job in level]
-            if not planned:
-                return
-            mojo_bin = discover_mojo(root, config.mojo_bin)
-            for level in levels:
-                if len(level) > 1:
-                    with ThreadPoolExecutor() as pool:
-                        futures = [
-                            pool.submit(
-                                compile_job,
-                                mojo_bin=mojo_bin,
-                                root=root,
-                                job=job,
-                                fail_fast=config.fail_fast,
-                            )
-                            for job in level
-                        ]
-                        for future in futures:
-                            success, log = future.result()
-                            if not success:
-                                self.app.display_warning(log)
-                            else:
-                                self.app.display_debug(log)
-                else:
-                    for job in level:
-                        success, log = compile_job(mojo_bin=mojo_bin, root=root, job=job, fail_fast=config.fail_fast)
-                        if not success:
-                            self.app.display_warning(log)
-                        else:
-                            self.app.display_debug(log)
-        else:
-            planned = plan_jobs(root, config)
-            if not planned:
-                return
-            mojo_bin = discover_mojo(root, config.mojo_bin)
-            for job in planned:
-                success, log = compile_job(
-                    mojo_bin=mojo_bin,
-                    root=root,
-                    job=job,
-                    fail_fast=config.fail_fast,
-                )
-                if not success:
-                    self.app.display_warning(log)
-                else:
-                    self.app.display_debug(log)
+        planned, mojo_bin = _compile_planned_jobs(self.app, root, config)
+        if not planned:
+            return
 
         manifest_files: list[Path] = [job.output_path for job in planned]
         if config.bundle_libs:
@@ -114,9 +137,13 @@ class MojoBuildHook(BuildHookInterface[Any]):
                 build_dir=config.build_dir,
                 jobs=planned,
                 mojo_bin=mojo_bin,
+                dist_name=_resolve_dist_name(self),
             )
-            build_data.setdefault("force_include", {}).update(bundled)
-            manifest_files.extend(Path(path_str) for path_str in bundled)
+            if bundled.force_include:
+                build_data.setdefault("force_include", {}).update(bundled.force_include)
+            if bundled.shared_data:
+                build_data.setdefault("shared_data", {}).update(bundled.shared_data)
+            manifest_files.extend(bundled.staged_files)
 
         register_artifacts(root=root, build_data=build_data, jobs=planned, target_name=self.target_name)
         if (

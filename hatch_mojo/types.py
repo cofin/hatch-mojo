@@ -28,3 +28,12 @@ class BuildJob:
     flags: tuple[str, ...]
     env: dict[str, str]
     depends_on: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class RuntimeBundleResult:
+    """Staged runtime library mappings for Hatch wheel inclusion."""
+
+    force_include: dict[str, str]
+    shared_data: dict[str, str]
+    staged_files: tuple[Path, ...]

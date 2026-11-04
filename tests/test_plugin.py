@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 from typing_extensions import Self
 
 from hatch_mojo.plugin import MojoBuildHook
-from hatch_mojo.types import BuildJob
+from hatch_mojo.types import BuildJob, RuntimeBundleResult
 
 if TYPE_CHECKING:
     import pytest
@@ -99,7 +99,11 @@ def test_initialize_serial_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kwargs: (True, "ok"))
     monkeypatch.setattr(
         "hatch_mojo.plugin.bundle_runtime_libs",
-        lambda **_kwargs: {str(tmp_path / "staged.so"): "pkg.libs/libFoo.so"},
+        lambda **_kwargs: RuntimeBundleResult(
+            force_include={str(tmp_path / "staged.so"): "pkg.libs/libFoo.so"},
+            shared_data={str(tmp_path / "shared_lib.so"): "lib/pkg.libs/libBar.so"},
+            staged_files=(tmp_path / "staged.so", tmp_path / "shared_lib.so"),
+        ),
     )
     monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: seq.append("register"))
     monkeypatch.setattr("hatch_mojo.plugin.save_manifest", _record_save)
@@ -111,7 +115,9 @@ def test_initialize_serial_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     assert seq.count("clean") == 1
     assert "register" in seq
     assert "save" in seq
-    assert saved_manifests == [("manifest.json", [job.output_path, tmp_path / "staged.so"])]
+    assert build_data["force_include"][str(tmp_path / "staged.so")] == "pkg.libs/libFoo.so"
+    assert build_data["shared_data"][str(tmp_path / "shared_lib.so")] == "lib/pkg.libs/libBar.so"
+    assert saved_manifests == [("manifest.json", [job.output_path, tmp_path / "staged.so", tmp_path / "shared_lib.so"])]
 
 
 def test_initialize_parallel_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -123,7 +129,10 @@ def test_initialize_parallel_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_args, **_kwargs: _config(parallel=True))
     monkeypatch.setattr("hatch_mojo.plugin.plan_jobs_leveled", lambda *_args, **_kwargs: [jobs])
     monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_args, **_kwargs: "mojo")
-    monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.bundle_runtime_libs",
+        lambda **_kwargs: RuntimeBundleResult(force_include={}, shared_data={}, staged_files=()),
+    )
     monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: None)
     monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_args, **_kwargs: None)
 
@@ -200,7 +209,10 @@ def test_initialize_editable_copies_artifacts(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_args, **_kwargs: [job])
     monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_args, **_kwargs: "mojo")
     monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kwargs: (True, "ok"))
-    monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.bundle_runtime_libs",
+        lambda **_kwargs: RuntimeBundleResult(force_include={}, shared_data={}, staged_files=()),
+    )
     monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: None)
     monkeypatch.setattr("hatch_mojo.plugin.save_manifest", _record_save)
 
@@ -215,7 +227,8 @@ def test_initialize_calls_bundle_when_enabled(monkeypatch: pytest.MonkeyPatch, t
     warnings: list[str] = []
     debugs: list[str] = []
     app = SimpleNamespace(display_warning=warnings.append, display_debug=debugs.append)
-    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app)
+    metadata = SimpleNamespace(core=SimpleNamespace(name="my-dist"))
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app, metadata=metadata)
     job = _job(tmp_path)
     monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_args, **_kwargs: _config(bundle_libs=True))
     monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_args, **_kwargs: [job])
@@ -224,17 +237,23 @@ def test_initialize_calls_bundle_when_enabled(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: None)
     monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_args, **_kwargs: None)
 
-    bundle_called = {"yes": False}
+    bundle_called: dict[str, Any] = {"yes": False, "dist_name": None}
 
-    def _fake_bundle(**_kwargs: Any) -> dict[str, str]:
+    def _fake_bundle(**kwargs: Any) -> RuntimeBundleResult:
         bundle_called["yes"] = True
-        return {"/tmp/staged.so": "pkg.libs/libFoo.so"}
+        bundle_called["dist_name"] = kwargs.get("dist_name")
+        return RuntimeBundleResult(
+            force_include={"/tmp/staged.so": "pkg.libs/libFoo.so"},
+            shared_data={},
+            staged_files=(Path("/tmp/staged.so"),),
+        )
 
     monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", _fake_bundle)
 
     build_data: dict[str, Any] = {}
     MojoBuildHook.initialize(cast("Any", fake), "standard", build_data)
     assert bundle_called["yes"] is True
+    assert bundle_called["dist_name"] == "my-dist"
     assert build_data["force_include"]["/tmp/staged.so"] == "pkg.libs/libFoo.so"
 
 
@@ -253,9 +272,9 @@ def test_initialize_skips_bundle_when_disabled(monkeypatch: pytest.MonkeyPatch, 
 
     bundle_called = {"yes": False}
 
-    def _fake_bundle(**_kwargs: Any) -> dict[str, str]:
+    def _fake_bundle(**_kwargs: Any) -> RuntimeBundleResult:
         bundle_called["yes"] = True
-        return {}
+        return RuntimeBundleResult(force_include={}, shared_data={}, staged_files=())
 
     monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", _fake_bundle)
 
