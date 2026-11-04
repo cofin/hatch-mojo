@@ -1,7 +1,5 @@
-.beads
-.agent
+.agents/scratch/
 specs
-AGENTS.md
 GEMINI.md
 CLAUDE.md
 .geminiignore

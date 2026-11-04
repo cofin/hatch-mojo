@@ -1,0 +1,12 @@
+# Hatch Build Pipeline Review Checklist (`HBP-01..HBP-08`)
+
+| Rule ID | Severity | Check | Target Surface |
+| --- | --- | --- | --- |
+| `HBP-01` | `Critical` | **Slotted Frozen Value Objects**: Every `@dataclass` in `hatch_mojo/` declares `@dataclass(slots=True, frozen=True)` and uses immutable `tuple[T, ...]` for sequence fields so `slotscheck` passes and parallel jobs cannot mutate shared config. | `hatch_mojo/*.py` |
+| `HBP-02` | `Critical` | **Config Cross-Field Validation**: `emit == "python-extension"` requires non-empty `module`; all other `EmitType` values require explicit `install.kind` (`package`, `data`, `scripts`, `root`, `force-include`) and `install.path`; inactive `target_name` returns `jobs=()` without raising. | `hatch_mojo/config.py` |
+| `HBP-03` | `Critical` | **Wheel Purity & Tag Inference**: `register_artifacts` sets `build_data["infer_tag"] = True` and `build_data["pure_python"] = False` whenever `target_name == "wheel"` and any planned job emits a binary other than `"object"`. | `hatch_mojo/artifacts.py` |
+| `HBP-04` | `Critical` | **Darwin Mach-O Header Padding**: `build_command` preserves `["-Xlinker", "-headerpad_max_install_names"]` on `darwin` for `python-extension`, `shared-lib`, and `executable` jobs so downstream `install_name_tool` RPATH patching never overflows load commands. | `hatch_mojo/compiler.py` |
+| `HBP-05` | `Important` | **Topological Determinism & Cycle Safety**: `plan_jobs` and `plan_jobs_leveled` sort ready jobs deterministically, validate unknown `depends_on` names up front, detect dependency cycles with `ValueError`, and reject duplicate expanded glob job names. | `hatch_mojo/planner.py` |
+| `HBP-06` | `Important` | **Unidirectional Module Dependencies**: Lower pipeline modules (`types`, `config`, `planner`, `compiler`, `runtime`, `artifacts`, `cleaning`) never import `hatch_mojo.plugin` or `hatch_mojo.hooks`. | `hatch_mojo/*.py` |
+| `HBP-07` | `Important` | **Public-Seam Canonical Tests**: Tests live in the matching `tests/test_<module>.py` or `tests/test_integration_*.py` file, exercise public functions with real `tmp_path` inputs, and avoid mocking the System Under Test or creating standalone `test_*remediation*.py` / `test_*audit*.py` files. | `tests/*.py` |
+| `HBP-08` | `Minor` | **Typing & Docstring Hygiene**: Code uses PEP 585 built-in generics (`list`, `dict`, `tuple`), PEP 604 `T | None` unions, and Google-style docstrings without inline `#` restatement comments. | `hatch_mojo/*.py`, `tests/*.py` |
