@@ -6,6 +6,8 @@ import textwrap
 import zipfile
 from pathlib import Path
 
+from hatchling.builders.wheel import WheelBuilder
+
 
 def _write_fake_mojo(path: Path) -> None:
     path.write_text(
@@ -211,3 +213,57 @@ def test_wheel_build_installs_executable_in_data_scripts(tmp_path: Path) -> None
         namelist = zf.namelist()
         assert "my_pkg-1.0.0.data/scripts/my-cli" in namelist, f"Contents: {namelist}"
         assert zf.read("my_pkg-1.0.0.data/scripts/my-cli") == binary_payload
+
+
+def test_editable_wheel_build_succeeds_by_default(tmp_path: Path) -> None:
+    project_dir = tmp_path / "editable_pkg"
+    project_dir.mkdir()
+
+    fake_mojo = project_dir / "mojo"
+    _write_fake_mojo(fake_mojo)
+
+    pyproject = project_dir / "pyproject.toml"
+    pyproject.write_text(
+        textwrap.dedent(f"""
+            [project]
+            name = "my-pkg"
+            version = "1.0.0"
+
+            [build-system]
+            build-backend = "hatchling.build"
+            requires = ["hatchling", "hatch-mojo"]
+
+            [tool.hatch.build.targets.wheel.hooks.mojo]
+            mojo-bin = "{fake_mojo.as_posix()}"
+            bundle-libs = false
+
+            [[tool.hatch.build.targets.wheel.hooks.mojo.jobs]]
+            name = "core"
+            input = "src/mo/core.mojo"
+            emit = "python-extension"
+            module = "my_pkg._core"
+        """),
+        encoding="utf-8",
+    )
+
+    src_mo = project_dir / "src" / "mo" / "core.mojo"
+    src_mo.parent.mkdir(parents=True)
+    src_mo.write_text("def main():\n    pass\n", encoding="utf-8")
+
+    pkg_dir = project_dir / "src" / "my_pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+
+    dist_dir = project_dir / "dist"
+    builder = WheelBuilder(str(project_dir))
+    artifacts = list(builder.build(directory=str(dist_dir), versions=["editable"]))
+    assert len(artifacts) == 1
+
+    suffix = ".pyd" if sys.platform == "win32" else ".so"
+    copied_ext = pkg_dir / f"_core{suffix}"
+    assert copied_ext.is_file()
+
+    with zipfile.ZipFile(artifacts[0], "r") as zf:
+        namelist = zf.namelist()
+    assert f"my_pkg/_core{suffix}" not in namelist
+    assert any(name.endswith(".pth") for name in namelist)

@@ -25,6 +25,7 @@ from hatch_mojo.runtime import (
     _write_license_notice,
     bundle_runtime_libs,
     discover_modular_lib,
+    patch_editable_runtime,
 )
 from hatch_mojo.types import BuildJob, RuntimeBundleResult
 
@@ -1317,6 +1318,124 @@ def test_bundle_darwin_shared_lib_and_scripts_executable(tmp_path: Path, monkeyp
     assert ["install_name_tool", "-add_rpath", "@loader_path/../lib/my_pkg.libs", str(cli)] in arg_lists
     assert ["codesign", "-s", "-", "-f", str(shlib)] in arg_lists
     assert ["codesign", "-s", "-", "-f", str(cli)] in arg_lists
+
+
+def test_patch_editable_runtime_persistent_sdk_linux(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    sdk_dir = _make_modular_lib(root / ".venv" / "modular")
+    monkeypatch.setenv("MODULAR_LIB_DIR", str(sdk_dir))
+
+    ext = root / "src" / "pkg" / "_core.so"
+    ext.parent.mkdir(parents=True)
+    ext.write_bytes(b"elf")
+    job = BuildJob("core", root / "core.mojo", ext, "python-extension", "pkg._core", None, None, (), (), (), {}, ())
+
+    with (
+        patch.object(sys, "platform", "linux"),
+        patch("hatch_mojo.runtime.subprocess.run") as mock_run,
+    ):
+        staged = patch_editable_runtime(root, "build/mojo", [job], None)
+
+    assert staged == ()
+    assert not (root / "build" / "mojo" / "editable.libs").exists()
+    mock_run.assert_called_once_with(
+        ["patchelf", "--set-rpath", str(sdk_dir.resolve()), str(ext)],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_patch_editable_runtime_persistent_sdk_darwin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    with patch.object(sys, "platform", "darwin"):
+        sdk_dir = _make_modular_lib(root / ".venv" / "modular")
+        monkeypatch.setenv("MODULAR_LIB_DIR", str(sdk_dir))
+
+        ext = root / "src" / "pkg" / "_core.so"
+        ext.parent.mkdir(parents=True)
+        ext.write_bytes(b"macho")
+        job = BuildJob("core", root / "core.mojo", ext, "python-extension", "pkg._core", None, None, (), (), (), {}, ())
+
+        linked = [str(sdk_dir / "libKGENCompilerRTShared.dylib")]
+        with (
+            patch("hatch_mojo.runtime.subprocess.run", return_value=SimpleNamespace(stdout="")) as mock_run,
+            patch("hatch_mojo.runtime._get_linked_libraries", return_value=linked),
+        ):
+            staged = patch_editable_runtime(root, "build/mojo", [job], None)
+
+    assert staged == ()
+    assert not (root / "build" / "mojo" / "editable.libs").exists()
+    arg_lists = [c.args[0] for c in mock_run.call_args_list]
+    assert ["otool", "-l", str(ext)] in arg_lists
+    assert [
+        "install_name_tool",
+        "-change",
+        str(sdk_dir / "libKGENCompilerRTShared.dylib"),
+        "@rpath/libKGENCompilerRTShared.dylib",
+        str(ext),
+    ] in arg_lists
+    assert ["install_name_tool", "-add_rpath", str(sdk_dir.resolve()), str(ext)] in arg_lists
+    assert arg_lists[-1] == ["codesign", "-s", "-", "-f", str(ext)]
+
+
+def test_patch_editable_runtime_ephemeral_sdk_linux_and_darwin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    ext = root / "src" / "pkg" / "_core.so"
+    ext.parent.mkdir(parents=True)
+    ext.write_bytes(b"elf")
+    job = BuildJob("core", root / "core.mojo", ext, "python-extension", "pkg._core", None, None, (), (), (), {}, ())
+
+    ephemeral_tmp = _make_modular_lib(tmp_path / "pep517_isolated" / "modular")
+    for lib_file in ephemeral_tmp.iterdir():
+        lib_file.chmod(stat.S_IRUSR)
+    monkeypatch.setenv("MODULAR_LIB_DIR", str(ephemeral_tmp))
+
+    with (
+        patch.object(sys, "platform", "linux"),
+        patch("hatch_mojo.runtime.subprocess.run") as mock_run,
+        patch(
+            "hatch_mojo.runtime._resolve_modular_dependencies",
+            return_value={"libKGENCompilerRTShared.so"},
+        ),
+    ):
+        staged = patch_editable_runtime(root, "build/mojo", [job], None)
+
+    editable_libs = root / "build" / "mojo" / "editable.libs"
+    assert editable_libs.is_dir()
+    staged_lib = editable_libs / "libKGENCompilerRTShared.so"
+    assert staged_lib in staged
+    assert (editable_libs / "NOTICE.mojo-runtime") in staged
+    assert staged_lib.stat().st_mode & stat.S_IWUSR
+    patchelf_calls = {c.args[0][3]: c.args[0][2] for c in mock_run.call_args_list if c.args[0][0] == "patchelf"}
+    assert patchelf_calls[str(staged_lib)] == "$ORIGIN"
+    assert patchelf_calls[str(ext)] == str(editable_libs.resolve())
+
+    with patch.object(sys, "platform", "darwin"):
+        uv_cache_sdk = _make_modular_lib(
+            root.parent / "fake_home" / ".cache" / "uv" / "builds-v0" / ".tmpAbCdEf" / "modular"
+        )
+        monkeypatch.setenv("MODULAR_LIB_DIR", str(uv_cache_sdk))
+        with (
+            patch("hatch_mojo.runtime.tempfile.gettempdir", return_value="/nonexistent_system_tmp"),
+            patch("hatch_mojo.runtime.subprocess.run", return_value=SimpleNamespace(stdout="")) as mock_mac_run,
+            patch(
+                "hatch_mojo.runtime._resolve_modular_dependencies",
+                return_value={"libKGENCompilerRTShared.dylib"},
+            ),
+        ):
+            staged_mac = patch_editable_runtime(root, "build/mojo_mac", [job], None)
+
+    mac_libs = root / "build" / "mojo_mac" / "editable.libs"
+    assert (mac_libs / "libKGENCompilerRTShared.dylib") in staged_mac
+    mac_args = [c.args[0] for c in mock_mac_run.call_args_list]
+    assert ["install_name_tool", "-add_rpath", str(mac_libs.resolve()), str(ext)] in mac_args
+    assert ["codesign", "-s", "-", "-f", str(ext)] in mac_args
 
 
 # ── test helpers ───────────────────────────────────────────────────────────

@@ -212,9 +212,10 @@ def test_initialize_editable_copies_artifacts(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_args, **_kwargs: [job])
     monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_args, **_kwargs: "mojo")
     monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kwargs: (True, "ok"))
+    monkeypatch.setattr("hatch_mojo.plugin.patch_editable_runtime", lambda *_a, **_kw: ())
     monkeypatch.setattr(
         "hatch_mojo.plugin.bundle_runtime_libs",
-        lambda **_kwargs: RuntimeBundleResult(force_include={}, shared_data={}, staged_files=()),
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("bundle_runtime_libs must not run on editable")),
     )
     monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kwargs: None)
     monkeypatch.setattr("hatch_mojo.plugin.save_manifest", _record_save)
@@ -391,3 +392,187 @@ def test_initialize_sets_bypass_selection_for_standalone_shared_scripts(
     )
     MojoBuildHook.initialize(cast("Any", fake_explicit), "standard", {})
     assert explicit_target_config["bypass-selection"] is False
+
+
+def test_initialize_fail_fast_false_filters_failed_and_dependent_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cfg = _config(bundle_libs=True)
+    cfg.fail_fast = False
+    job_ok = _job(tmp_path, name="ok")
+    job_ok.output_path.write_bytes(b"ok")
+    job_bad = _job(tmp_path, name="bad")
+    job_dep = BuildJob(
+        name="dep",
+        input_path=tmp_path / "dep.mojo",
+        output_path=tmp_path / "dep.so",
+        emit="python-extension",
+        module="pkg._dep",
+        install_kind=None,
+        install_path=None,
+        include_dirs=(),
+        defines=(),
+        flags=(),
+        env={},
+        depends_on=("bad",),
+    )
+
+    warnings: list[str] = []
+    debugs: list[str] = []
+    app = SimpleNamespace(display_warning=warnings.append, display_debug=debugs.append)
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app)
+
+    monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_a, **_kw: cfg)
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_a, **_kw: [job_ok, job_bad, job_dep])
+    monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_a, **_kw: "mojo")
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.compile_job",
+        lambda *, job, **_kw: (False, f"failed:{job.name}") if job.name == "bad" else (True, f"ok:{job.name}"),
+    )
+
+    bundled_jobs: list[str] = []
+    registered_jobs: list[str] = []
+    saved_outputs: list[Path] = []
+
+    def _fake_bundle(*, jobs: list[BuildJob], **_kw: Any) -> RuntimeBundleResult:
+        bundled_jobs.extend(j.name for j in jobs)
+        return RuntimeBundleResult(force_include={}, shared_data={}, staged_files=())
+
+    def _fake_register(*, jobs: list[BuildJob], **_kw: Any) -> None:
+        registered_jobs.extend(j.name for j in jobs)
+
+    def _fake_save(root: Path, build_dir: str, outputs: list[Path], **_kw: Any) -> Path:
+        saved_outputs.extend(outputs)
+        return root / build_dir / "manifest.json"
+
+    monkeypatch.setattr("hatch_mojo.plugin.bundle_runtime_libs", _fake_bundle)
+    monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", _fake_register)
+    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", _fake_save)
+
+    MojoBuildHook.initialize(cast("Any", fake), "standard", {})
+    assert bundled_jobs == ["ok"]
+    assert registered_jobs == ["ok"]
+    assert saved_outputs == [job_ok.output_path]
+    assert any("failed:bad" in w for w in warnings)
+    assert any("dep" in w for w in warnings)
+
+
+def test_initialize_editable_uses_raw_target_config_packages_without_force_include(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    custom_pkg = tmp_path / "python" / "my_pkg"
+    custom_pkg.mkdir(parents=True)
+    (custom_pkg / "__init__.py").write_text("", encoding="utf-8")
+
+    raw_out = tmp_path / "build" / "mojo" / "my_pkg" / "_core.so"
+    raw_out.parent.mkdir(parents=True)
+    raw_out.write_bytes(b"pristine-compiler-bytes")
+
+    job = BuildJob(
+        name="core",
+        input_path=tmp_path / "core.mojo",
+        output_path=raw_out,
+        emit="python-extension",
+        module="my_pkg._core",
+        install_kind=None,
+        install_path=None,
+        include_dirs=(),
+        defines=(),
+        flags=(),
+        env={},
+        depends_on=(),
+    )
+
+    class _ExplodingBuildConfig:
+        def __init__(self) -> None:
+            self.target_config: dict[str, Any] = {"packages": ["python/my_pkg"]}
+            self.build_config: dict[str, Any] = {}
+
+        @property
+        def packages(self) -> list[str]:
+            raise AssertionError("build_config.packages property must not be evaluated prematurely")
+
+    cfg = _config(bundle_libs=True)
+    cfg.skip_editable = False
+    app = SimpleNamespace(display_warning=lambda *_a: None, display_debug=lambda *_a: None)
+    fake = SimpleNamespace(
+        root=str(tmp_path),
+        config={},
+        target_name="wheel",
+        app=app,
+        build_config=_ExplodingBuildConfig(),
+    )
+
+    patched_targets: list[Path] = []
+
+    def _fake_patch_editable(
+        _root: Path, _build_dir: str, jobs: list[BuildJob], _mojo_bin: str | None
+    ) -> tuple[Path, ...]:
+        for j in jobs:
+            patched_targets.append(j.output_path)
+            j.output_path.write_bytes(b"patched-editable-bytes")
+        return ()
+
+    monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_a, **_kw: cfg)
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_a, **_kw: [job])
+    monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_a, **_kw: "mojo")
+    monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kw: (True, "ok"))
+    monkeypatch.setattr("hatch_mojo.plugin.patch_editable_runtime", _fake_patch_editable)
+
+    build_data: dict[str, Any] = {}
+    MojoBuildHook.initialize(cast("Any", fake), "editable", build_data)
+
+    copied = custom_pkg / "_core.so"
+    assert copied.read_bytes() == b"patched-editable-bytes"
+    assert raw_out.read_bytes() == b"pristine-compiler-bytes"
+    assert patched_targets == [copied]
+    assert not build_data.get("force_include")
+
+
+def test_initialize_editable_dev_mode_exact_copies_submodules_and_preserves_force_include(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pkg_dir = tmp_path / "src" / "my_pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+
+    sub_out = tmp_path / "build" / "mojo" / "my_pkg" / "_core.so"
+    top_out = tmp_path / "build" / "mojo" / "_top.so"
+    sub_out.parent.mkdir(parents=True)
+    sub_out.write_bytes(b"sub")
+    top_out.write_bytes(b"top")
+
+    jobs = [
+        BuildJob(
+            "sub", tmp_path / "a.mojo", sub_out, "python-extension", "my_pkg._core", None, None, (), (), (), {}, ()
+        ),
+        BuildJob("top", tmp_path / "b.mojo", top_out, "python-extension", "_top", None, None, (), (), (), {}, ()),
+    ]
+
+    cfg = _config(bundle_libs=False)
+    cfg.skip_editable = False
+    app = SimpleNamespace(display_warning=lambda *_a: None, display_debug=lambda *_a: None)
+    build_config = SimpleNamespace(
+        target_config={"dev-mode-exact": True},
+        build_config={},
+        get_force_include=lambda: {"/existing/readme.txt": "readme.txt"},
+    )
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app, build_config=build_config)
+
+    monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_a, **_kw: cfg)
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_a, **_kw: jobs)
+    monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_a, **_kw: "mojo")
+    monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kw: (True, "ok"))
+
+    build_data: dict[str, Any] = {}
+    MojoBuildHook.initialize(cast("Any", fake), "editable", build_data)
+
+    assert (pkg_dir / "_core.so").read_bytes() == b"sub"
+    assert not build_data.get("force_include")
+    fi_editable = build_data["force_include_editable"]
+    assert fi_editable["/existing/readme.txt"] == "readme.txt"
+    assert "_top.so" in fi_editable.values()
+    assert "my_pkg/_core.so" not in fi_editable.values()

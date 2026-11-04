@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path, PurePosixPath
 
 from hatch_mojo.artifacts import resolve_install_target
@@ -606,3 +607,54 @@ def bundle_runtime_libs(
         shared_data=shared_data,
         staged_files=tuple(staged_files),
     )
+
+
+def _is_ephemeral_sdk(modular_lib: Path, root: Path) -> bool:
+    """Return True when *modular_lib* resides inside an ephemeral PEP 517 build directory."""
+    resolved = modular_lib.resolve()
+    if resolved.is_relative_to(root.resolve()):
+        return False
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    if resolved.is_relative_to(temp_root):
+        return True
+    return any(
+        part == "builds-v0" or part.startswith((".tmp", "pip-build-env-", "build-env-")) for part in resolved.parts
+    )
+
+
+def patch_editable_runtime(
+    root: Path,
+    build_dir: str,
+    jobs: list[BuildJob],
+    mojo_bin: str | None,
+) -> tuple[Path, ...]:
+    """Patch editable binaries to resolve Mojo runtime libraries from persistent or staged SDK dirs."""
+    if sys.platform == "win32":
+        return ()
+
+    linkable = [job for job in jobs if job.emit in {"python-extension", "shared-lib", "executable"}]
+    if not linkable:
+        return ()
+
+    modular_lib = discover_modular_lib(root, mojo_bin)
+    if _is_ephemeral_sdk(modular_lib, root):
+        libs_dir = root / build_dir / "editable.libs"
+        target_rpaths = [str(libs_dir.resolve())]
+        group_jobs = [(job, target_rpaths) for job in linkable]
+        _, staged = _stage_bundle_group(libs_dir, "editable.libs", group_jobs, modular_lib)
+        return tuple(staged)
+
+    target_rpaths = [str(modular_lib.resolve())]
+    if sys.platform == "darwin":
+        sdk_libs = sorted(entry.name for entry in modular_lib.iterdir() if entry.is_file())
+        for job in linkable:
+            _patch_macos_extension(
+                job.output_path,
+                sdk_libs,
+                target_rpaths,
+                set_install_id=(job.emit == "shared-lib"),
+            )
+    else:
+        for job in linkable:
+            _patch_rpath(job.output_path, target_rpaths)
+    return ()
