@@ -3,17 +3,17 @@ type: Spec
 flow_id: wheel-tags-metadata-and-ci
 title: "Wheel Tag Policy, PEP 639 Metadata, Docs & Multi-OS CI"
 description: "Add wheel-tag (auto/infer/py3-none/<pep425_tag>) support, migrate repository metadata to PEP 639 with MIT LICENSE, expand CI to macOS and Python 3.15, and align README and skills with Mojo 1.2+."
-state: planned
+state: completed
 parent_prd: v0-2-overhaul
 research:
   - ../v0-2-overhaul/research/mojo-packaging-landscape-audit_20261104.md
 plan_revision: 3
-plan_commit: null
-state_revision: 0
+plan_commit: 7e10d5b
+state_revision: 4
 current_task: null
-last_verified_checkpoint: null
+last_verified_checkpoint: 19d20d7
 created_at: 2026-11-04T05:12:00Z
-updated_at: 2026-11-04T06:04:00Z
+updated_at: 2026-11-04T20:38:00Z
 tags: [feature, wheel-tag, pep639, ci, cibuildwheel]
 ---
 
@@ -98,17 +98,18 @@ With Mojo `1.2+` compiler CLI, Hatchling `1.33+` lifecycle, runtime bundling, ed
 ## 4. Implementation Plan
 
 ### Phase 1: Wheel Tag Policy, PEP 639 Packaging, CI & Documentation
-- [ ] t01 — Implement `wheel-tag` (`auto`/`infer`/`py3-none`/custom) config validation and `register_artifacts` platform tag resolution (tasks/t01-wheel-tag-policy.md)
-- [ ] t02 — Migrate `pyproject.toml` to PEP 639 with MIT `LICENSE`, clean `Makefile`, and add `macos-latest` + Python `3.15` CI (tasks/t02-pep639-metadata-and-ci-matrix.md)
-- [ ] t03 — Rewrite `README.md` for Mojo `1.2+` / `cibuildwheel 4.x` and synchronize `.agents/skills/` invariants (tasks/t03-docs-and-skill-alignment.md)
+- [x] [6d73892] t01 — Implement `wheel-tag` (`auto`/`infer`/`py3-none`/custom) config validation and `register_artifacts` platform tag resolution (tasks/t01-wheel-tag-policy.md)
+- [x] [5b79a13] t02 — Migrate `pyproject.toml` to PEP 639 with MIT `LICENSE`, clean `Makefile`, and add `macos-latest` + Python `3.15` CI (tasks/t02-pep639-metadata-and-ci-matrix.md)
+- [x] [19d20d7] t03 — Rewrite `README.md` for Mojo `1.2+` / `cibuildwheel 4.x` and synchronize `.agents/skills/` invariants (tasks/t03-docs-and-skill-alignment.md)
 - **Phase 1 Recovery Checkpoint**: `uv build && uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run pyright && uv run slotscheck hatch_mojo && uv run pytest -q`
 
 ## 5. Continuity Snapshot
-- **Flow ID**: `wheel-tags-metadata-and-ci` (`state: planned`, `plan_revision: 3`, `plan_commit: null`)
+- **Flow ID**: `wheel-tags-metadata-and-ci` (`state: completed`, `plan_revision: 3`, `plan_commit: 7e10d5b`)
 - **Current Task**: `null`
-- **Last Verified Checkpoint**: `null`
+- **Last Verified Checkpoint**: `19d20d7`
 - **Key Decisions**:
   - `wheel-tag` defaults to `"auto"` (`"infer"` when any `python-extension` job is present; `"py3-none"` when native jobs are exclusively standalone `executable`/`shared-lib`), with explicit `"py3-none"` and custom PEP 425 tag overrides.
   - `trove_classifiers` in `uv.lock` already includes `"Programming Language :: Python :: 3.15"`, allowing immediate PEP 639 + Python 3.15 metadata verification via `uv build`.
 - **Recent Discoveries**:
   - `hatchling.builders.wheel.WheelBuilder.build_standard` checks `if "tag" not in build_data:` before `if build_data["infer_tag"]:`, so setting `build_data["tag"] = f"py3-none-{plat}"` alongside `infer_tag = False` and `pure_python = False` integrates directly with `WheelBuilder.write_archive_metadata`.
+  - Achieved `100.00%` statement and branch coverage (`179 passed`, `covdefaults` `fail-under = 100`) in `7a96a66` and synchronized all 14 documentation, skill, and OKF knowledge files in `19d20d7`.

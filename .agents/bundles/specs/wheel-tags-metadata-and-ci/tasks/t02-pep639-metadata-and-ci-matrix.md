@@ -3,7 +3,7 @@ type: Task
 id: wheel-tags-metadata-and-ci:t02
 title: "Migrate pyproject.toml to PEP 639 with MIT LICENSE, clean Makefile, and add macos-latest + Python 3.15 CI"
 description: "Add root MIT LICENSE, migrate pyproject.toml to PEP 639 with Python 3.15 classifier, clean Makefile, and expand CI workflows to macOS and Python 3.15."
-state: pending
+state: completed
 priority: P1
 verification_strategy: static_validation
 depends_on:
@@ -17,19 +17,19 @@ files:
 tests:
   - tests/test_integration_wheel.py
 plan_revision: 3
-plan_commit: null
-state_revision: 0
+plan_commit: 7e10d5b
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-04T20:16:38Z
+last_verified_commit: 5b79a13
+verification_evidence: "uv lock --check; uv build; uv run pytest -q (169 passed); ruff, mypy, pyright, slotscheck exit 0"
 created_at: 2026-11-04T05:12:00Z
-updated_at: 2026-11-04T06:13:00Z
-commit: null
+updated_at: 2026-11-04T20:17:37Z
+commit: 5b79a13
 tags: [migration, pep639, makefile, github-actions, ci]
 ---
 
@@ -74,10 +74,10 @@ uv run pytest -q
 
 ## Acceptance Criteria
 
-- [ ] Root `LICENSE` exists with standard MIT text and `pyproject.toml` declares `license = "MIT"`, `license-files = ["LICENSE"]`, and `"Programming Language :: Python :: 3.15"` without `"License :: OSI Approved :: MIT License"` (`R2`).
-- [ ] `uv build --wheel` embeds `License-Expression: MIT` and `.dist-info/licenses/LICENSE` cleanly (`R2`).
-- [ ] `Makefile` omits `uv python pin 3.10` and `.hatch_mojo`, `ci.yml` includes `macos-latest` + `"3.15"`, and `publish.yml` includes `"3.14"` + `"3.15"` (`R2`).
-- [ ] Full static analysis and `pytest` suite exit `0`.
+- [x] Root `LICENSE` exists with standard MIT text and `pyproject.toml` declares `license = "MIT"`, `license-files = ["LICENSE"]`, and `"Programming Language :: Python :: 3.15"` without `"License :: OSI Approved :: MIT License"` (`R2`).
+- [x] `uv build --wheel` embeds `License-Expression: MIT` and `.dist-info/licenses/LICENSE` cleanly (`R2`).
+- [x] `Makefile` omits `uv python pin 3.10` and `.hatch_mojo`, `ci.yml` includes `macos-latest` + `"3.15"`, and `publish.yml` includes `"3.14"` + `"3.15"` (`R2`).
+- [x] Full static analysis and `pytest` suite exit `0`.
 
 ## Notes & Discoveries
 

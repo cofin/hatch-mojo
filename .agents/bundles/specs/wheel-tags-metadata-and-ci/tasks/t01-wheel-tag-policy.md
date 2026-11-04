@@ -3,7 +3,7 @@ type: Task
 id: wheel-tags-metadata-and-ci:t01
 title: "Implement wheel-tag (auto/infer/py3-none/custom) config validation and register_artifacts platform tag resolution"
 description: "Validate wheel-tag options in HookConfig and resolve Hatchling-compatible py3-none/infer/custom PEP 425 wheel tags in register_artifacts."
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on: []
@@ -17,19 +17,19 @@ tests:
   - tests/test_plugin.py
   - tests/test_integration_wheel.py
 plan_revision: 3
-plan_commit: null
-state_revision: 0
+plan_commit: 7e10d5b
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-04T20:12:11Z
+last_verified_commit: 6d73892
+verification_evidence: "uv run pytest tests/test_config.py tests/test_artifacts.py tests/test_plugin.py tests/test_integration_wheel.py -q (58 passed); ruff, mypy, pyright, slotscheck exit 0"
 created_at: 2026-11-04T05:12:00Z
-updated_at: 2026-11-04T06:13:00Z
-commit: null
+updated_at: 2026-11-04T20:12:56Z
+commit: 6d73892
 tags: [feature, wheel-tag, pep425, py3-none, hatchling]
 ---
 
@@ -80,10 +80,10 @@ uv run pytest tests/test_config.py tests/test_artifacts.py tests/test_plugin.py 
 
 ## Acceptance Criteria
 
-- [ ] `parse_config` validates `wheel-tag` (`"auto"`, `"infer"`, `"py3-none"`, or 3-part PEP 425 tag) and `HATCH_MOJO_WHEEL_TAG` (`R1`).
-- [ ] `register_artifacts` resolves `"auto"` to `"infer"` for extensions and `"py3-none"` for standalone native binaries, and emits `py3-none-<platform>` with `Root-Is-Purelib: false` when `"py3-none"` is active (`R1`).
-- [ ] `resolve_host_platform_tag` normalizes macOS platform tags via `process_macos_plat_tag` on `darwin` (`R1`).
-- [ ] `ruff`, `mypy`, `pyright`, `slotscheck`, and focused `pytest` modules exit `0`.
+- [x] `parse_config` validates `wheel-tag` (`"auto"`, `"infer"`, `"py3-none"`, or 3-part PEP 425 tag) and `HATCH_MOJO_WHEEL_TAG` (`R1`).
+- [x] `register_artifacts` resolves `"auto"` to `"infer"` for extensions and `"py3-none"` for standalone native binaries, and emits `py3-none-<platform>` with `Root-Is-Purelib: false` when `"py3-none"` is active (`R1`).
+- [x] `resolve_host_platform_tag` normalizes macOS platform tags via `process_macos_plat_tag` on `darwin` (`R1`).
+- [x] `ruff`, `mypy`, `pyright`, `slotscheck`, and focused `pytest` modules exit `0`.
 
 ## Notes & Discoveries
 

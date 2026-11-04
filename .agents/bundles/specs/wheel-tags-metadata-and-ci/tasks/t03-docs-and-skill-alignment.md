@@ -3,7 +3,7 @@ type: Task
 id: wheel-tags-metadata-and-ci:t03
 title: "Rewrite README.md for Mojo 1.2+ / cibuildwheel 4.x and synchronize .agents/skills/ invariants"
 description: "Update README.md for Mojo 1.2+, wheel-tag, editable/cache defaults, and cibuildwheel 4.x, and synchronize .agents/skills/ and knowledge chapters."
-state: pending
+state: completed
 priority: P2
 verification_strategy: documentation_validation
 depends_on:
@@ -25,19 +25,19 @@ files:
   - .agents/bundles/knowledge/gotchas/platform-linking-and-build-quirks.md
 tests: []
 plan_revision: 3
-plan_commit: null
-state_revision: 0
+plan_commit: 7e10d5b
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-04T20:38:00Z
+last_verified_commit: 19d20d7
+verification_evidence: "uv run pytest --cov -q (179 passed, 100.00% statement and branch coverage); ruff, mypy, pyright, slotscheck exit 0; git grep stale-reference audit exit 1 (0 matches)"
 created_at: 2026-11-04T05:12:00Z
-updated_at: 2026-11-04T06:04:00Z
-commit: null
+updated_at: 2026-11-04T20:38:00Z
+commit: 19d20d7
 tags: [docs, readme, cibuildwheel, skills, mojo-1-2]
 ---
 
@@ -79,10 +79,10 @@ uv run pytest --cov -q
 
 ## Acceptance Criteria
 
-- [ ] `README.md` accurately documents Mojo `1.2+` (`mojo-compiler>=1.2.0`, `mojoc`, `wheel-tag`, `skip-editable = false`, `cache = true`, `{stem}`, `Apache-2.0 WITH LLVM-exception` bundling, and `cibuildwheel 4.x` `manylinux_2_34` + `uvx wheel tags`) with zero stale `static-lib` or `Modular Community License` claims (`R3`).
-- [ ] `.agents/skills/` `SKILL.md` and `references/*.md` files reflect `v0.2.0` pipeline and runtime-bundling invariants (`R3`).
-- [ ] Full lint, typecheck, `slotscheck`, and `pytest --cov` verification gate exits `0`.
+- [x] `README.md` accurately documents Mojo `1.2+` (`mojo-compiler>=1.2.0`, `mojoc`, `wheel-tag`, `skip-editable = false`, `cache = true`, `{stem}`, `Apache-2.0 WITH LLVM-exception` bundling, and `cibuildwheel 4.x` `manylinux_2_34` + `uvx wheel tags`) with zero stale `static-lib` or `Modular Community License` claims (`R3`).
+- [x] `.agents/skills/` `SKILL.md` and `references/*.md` files reflect `v0.2.0` pipeline and runtime-bundling invariants (`R3`).
+- [x] Full lint, typecheck, `slotscheck`, and `pytest --cov` verification gate exits `0`.
 
 ## Notes & Discoveries
 
-_None._
+- Added comprehensive public-seam unit tests and pruned unreachable defensive guards in `7a96a66` so `covdefaults` (`fail-under = 100`, `branch = true`) passes at `100.00%` (`179 passed`).

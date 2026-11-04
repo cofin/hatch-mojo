@@ -3,17 +3,17 @@ type: Spec
 flow_id: v0-2-overhaul
 title: "hatch-mojo v0.2.0 Architectural Overhaul"
 description: "Multi-flow roadmap modernizing hatch-mojo for Mojo 1.2+, Hatchling 1.33+, Apache-2.0 runtime bundling, zero-copy editable installs, digest caching, and py3-none wheel tagging."
-state: active
+state: completed
 parent_prd: null
 research:
   - research/mojo-packaging-landscape-audit_20261104.md
 plan_revision: 3
 plan_commit: 9782b0b
-state_revision: 3
-current_task: wheel-tags-metadata-and-ci
-last_verified_checkpoint: 5731ab7
+state_revision: 4
+current_task: null
+last_verified_checkpoint: 19d20d7
 created_at: 2026-11-04T05:00:00Z
-updated_at: 2026-11-04T20:03:00Z
+updated_at: 2026-11-04T20:38:00Z
 tags: [migration, mojo, hatchling, packaging, v0-2-0]
 ---
 
@@ -63,7 +63,7 @@ Deliver `hatch-mojo v0.2.0` so Python packages embedding Mojo extensions, shared
 | 1 | `mojo-1-2-toolchain` | Mojo 1.2 Toolchain, Precompile & Apache-2.0 Runtime Discovery | `mojoc` (`mojo precompile`) emit, `--emit exe`, `mojo-compiler` / wrapper-venv SDK discovery, shebang-safe `win32` stub runner, `Apache-2.0 WITH LLVM-exception` notice | `parse_config`, `plan_jobs`, `discover_mojo`, `build_command`, `compile_job`, `discover_modular_lib`, `bundle_runtime_libs` | None | `completed` |
 | 2 | `hatchling-lifecycle-and-bundling` | Hatchling 1.33 Lifecycle, Artifact Routing & Full Binary Bundling | `MojoBuildHook.finalize` cleanup, `config.build_dir` propagation, full manifest pruning, `shared_scripts`/`shared_data` routing, `executable`/`shared-lib` runtime bundling, Mach-O RPATH hardening | `MojoBuildHook.{initialize,finalize,clean}`, `register_artifacts`, `bundle_runtime_libs`, `save_manifest`, `clean_from_manifest` | `mojo-1-2-toolchain` | `completed` |
 | 3 | `editable-planner-and-caching` | Editable Installs, Glob/DAG Planner Fixes & Digest Build Cache | `skip-editable = false` default, `force_include_editable` / package-aware editable RPATHs, profile list/dict merging, `{stem}` multi-glob & `depends-on` expansion, `fail-fast = false` filtering, SHA-256 `cache.json` | `parse_config`, `plan_jobs`, `plan_jobs_leveled`, `compile_job`, `patch_editable_runtime`, `MojoBuildHook.initialize` | `hatchling-lifecycle-and-bundling` | `completed` |
-| 4 | `wheel-tags-metadata-and-ci` | Wheel Tag Policy, PEP 639 Metadata, Docs & Multi-OS CI | `wheel-tag` (`auto`/`infer`/`py3-none`/custom), PEP 639 `license = "MIT"` + `LICENSE`, `macos-latest` + Python `3.15` CI, Mojo `1.2` + `cibuildwheel 4.x` docs and skill sync | `parse_config`, `register_artifacts`, `pyproject.toml`, `.github/workflows/{ci,publish}.yml`, `README.md` | `editable-planner-and-caching` | `planned` |
+| 4 | `wheel-tags-metadata-and-ci` | Wheel Tag Policy, PEP 639 Metadata, Docs & Multi-OS CI | `wheel-tag` (`auto`/`infer`/`py3-none`/custom), PEP 639 `license = "MIT"` + `LICENSE`, `macos-latest` + Python `3.15` CI, Mojo `1.2` + `cibuildwheel 4.x` docs and skill sync | `parse_config`, `register_artifacts`, `pyproject.toml`, `.github/workflows/{ci,publish}.yml`, `README.md` | `editable-planner-and-caching` | `completed` |
 
 ## 4. Global Constraints (Applicable to All Child Flows)
 
@@ -85,13 +85,13 @@ Deliver `hatch-mojo v0.2.0` so Python packages embedding Mojo extensions, shared
 - [x] [67252d3] mojo-1-2-toolchain — Align compiler CLI (`exe`, `mojoc`), `mojo-compiler` SDK discovery, `win32` stub safety, and `Apache-2.0 WITH LLVM-exception` notices (../mojo-1-2-toolchain/spec.md)
 - [x] [c694718] hatchling-lifecycle-and-bundling — Fix `finalize` cleanup, `build-dir`, `shared_scripts`/`shared_data` routing, and `executable`/`shared-lib` runtime bundling (../hatchling-lifecycle-and-bundling/spec.md)
 - [x] [5731ab7] editable-planner-and-caching — Deliver zero-copy editable installs, profile/glob/DAG planner fixes, `fail-fast = false` filtering, and SHA-256 build caching (../editable-planner-and-caching/spec.md)
-- [ ] wheel-tags-metadata-and-ci — Add `wheel-tag` (`auto`/`infer`/`py3-none`), PEP 639 metadata, `macos-latest` + Python `3.15` CI, and Mojo `1.2` documentation (../wheel-tags-metadata-and-ci/spec.md)
+- [x] [19d20d7] wheel-tags-metadata-and-ci — Add `wheel-tag` (`auto`/`infer`/`py3-none`), PEP 639 metadata, `macos-latest` + Python `3.15` CI, and Mojo `1.2` documentation (../wheel-tags-metadata-and-ci/spec.md)
 
 ## Continuity Snapshot
 
-- **Flow ID**: `v0-2-overhaul` (`state: active`, `plan_revision: 3`, `plan_commit: 9782b0b`)
-- **Current Task**: `wheel-tags-metadata-and-ci`
-- **Last Verified Checkpoint**: `5731ab7`
+- **Flow ID**: `v0-2-overhaul` (`state: completed`, `plan_revision: 3`, `plan_commit: 9782b0b`)
+- **Current Task**: `null`
+- **Last Verified Checkpoint**: `19d20d7`
 - **Key Decisions**:
   - Replaced unsupported `static-lib` with `mojoc` (`mojo precompile`) and mapped `executable` &rarr; `--emit exe`.
   - Added `wheel-tag = "auto" | "infer" | "py3-none" | "<tag>"` defaulting to `"infer"` for `python-extension` and `"py3-none"` for standalone binaries.
