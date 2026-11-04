@@ -83,21 +83,7 @@ def _validate_deps(by_name: dict[str, BuildJob], remaining: dict[str, set[str]])
 
 
 def _topological_sort(jobs: list[BuildJob]) -> list[BuildJob]:
-    by_name = {job.name: job for job in jobs}
-    remaining = {job.name: set(job.depends_on) for job in jobs}
-    _validate_deps(by_name, remaining)
-    ordered: list[BuildJob] = []
-    while remaining:
-        ready = sorted(name for name, deps in remaining.items() if not deps)
-        if not ready:
-            cycle = ", ".join(sorted(remaining))
-            raise ValueError(f"Dependency cycle detected among jobs: {cycle}")
-        for name in ready:
-            ordered.append(by_name[name])
-            del remaining[name]
-        for deps in remaining.values():
-            deps.difference_update(ready)
-    return ordered
+    return [job for level in _topological_levels(jobs) for job in level]
 
 
 def _topological_levels(jobs: list[BuildJob]) -> list[list[BuildJob]]:
@@ -192,16 +178,15 @@ def _expand_all_jobs(root: Path, config: HookConfig) -> list[BuildJob]:
                 raise ValueError(f"Duplicate output path '{build_job.output_path}' across expanded jobs")
             seen_outputs.add(build_job.output_path)
 
-            if build_job.emit == "python-extension" or build_job.install_kind is not None:
-                section = (
-                    build_job.install_kind
-                    if build_job.emit != "python-extension" and build_job.install_kind in {"scripts", "data"}
-                    else "platlib"
-                )
-                target_key = (section, resolve_install_target(build_job))
-                if target_key in seen_targets:
-                    raise ValueError(f"Duplicate install target '{target_key[1]}' across expanded jobs")
-                seen_targets.add(target_key)
+            section = (
+                build_job.install_kind
+                if build_job.emit != "python-extension" and build_job.install_kind in {"scripts", "data"}
+                else "platlib"
+            )
+            target_key = (section, resolve_install_target(build_job))
+            if target_key in seen_targets:
+                raise ValueError(f"Duplicate install target '{target_key[1]}' across expanded jobs")
+            seen_targets.add(target_key)
 
             concrete_names.append(concrete_name)
             jobs.append(build_job)

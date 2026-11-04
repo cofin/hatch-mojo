@@ -35,8 +35,6 @@ def save_manifest(
 
 def _prune_empty_dirs(build_root: Path) -> None:
     """Remove empty subdirectories inside *build_root* bottom-up, then *build_root* if empty."""
-    if not build_root.is_dir():
-        return
     subdirs = sorted((candidate for candidate in build_root.rglob("*") if candidate.is_dir()), reverse=True)
     for directory in (*subdirs, build_root):
         with contextlib.suppress(OSError):
@@ -62,9 +60,7 @@ def clean_from_manifest(
     for path in existing:
         payload = json.loads(path.read_text(encoding="utf-8"))
         for item in payload:
-            file_path = Path(item)
-            if file_path.exists():
-                file_path.unlink()
+            Path(item).unlink(missing_ok=True)
         path.unlink(missing_ok=True)
 
     cache_file.unlink(missing_ok=True)

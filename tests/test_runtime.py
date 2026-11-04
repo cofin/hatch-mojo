@@ -1441,6 +1441,85 @@ def test_patch_editable_runtime_ephemeral_sdk_linux_and_darwin(
 # ── test helpers ───────────────────────────────────────────────────────────
 
 
+def test_discover_and_runtime_remaining_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_ambient_sdk(monkeypatch)
+    monkeypatch.setattr("hatch_mojo.runtime.shutil.which", lambda _: None)
+
+    prefix = tmp_path / "sdk_prefix"
+    sibling_lib = _make_modular_lib(prefix / "modular")
+    mojo_bin = prefix / "bin" / "mojo"
+    mojo_bin.parent.mkdir(parents=True)
+    mojo_bin.write_bytes(b"")
+    assert discover_modular_lib(tmp_path, str(mojo_bin)) == sibling_lib
+
+    deep = tmp_path / "d1" / "d2" / "d3" / "d4" / "d5" / "d6"
+    (deep / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
+    empty_pkg_root = tmp_path / "empty_pkg_root"
+    empty_pkg_root.mkdir()
+    monkeypatch.setitem(sys.modules, "mojo", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules, "mojo._package_root", SimpleNamespace(get_package_root=lambda: str(empty_pkg_root))
+    )
+
+    def _raising_find_spec(_name: str) -> None:
+        raise ValueError("broken spec")
+
+    monkeypatch.setattr("hatch_mojo.runtime.importlib.util.find_spec", _raising_find_spec)
+    with pytest.raises(FileNotFoundError):
+        discover_modular_lib(tmp_path, str(deep / "bin" / "mojo"))
+    with pytest.raises(FileNotFoundError):
+        discover_modular_lib(tmp_path, "/nonexistent_root_mojo")
+
+    libs_dir = tmp_path / "notice_libs"
+    libs_dir.mkdir()
+    missing_site_lib = tmp_path / "no_site_root" / "modular" / "lib"
+    assert len(_write_license_notice(libs_dir, ["libFoo.so"], missing_site_lib)) == 1
+
+    dir_license_site = tmp_path / "dir_site"
+    dir_mod_lib = dir_license_site / "modular" / "lib"
+    dir_mod_lib.mkdir(parents=True)
+    (dir_license_site / "mojo-1.2.0.dist-info" / "LICENSE_DIR").mkdir(parents=True)
+    assert len(_write_license_notice(libs_dir, ["libFoo.so"], dir_mod_lib)) == 1
+
+    otool_blank_line = "/path/to/bin:\n\tnot a dylib line\n"
+    with (
+        patch("sys.platform", "darwin"),
+        patch("hatch_mojo.runtime.subprocess.run", return_value=SimpleNamespace(stdout=otool_blank_line)),
+    ):
+        assert _get_linked_libraries(mojo_bin) == []
+
+    dylib_dir = tmp_path / "mac_libs"
+    dylib_dir.mkdir()
+    (dylib_dir / "libA.dylib").write_bytes(b"")
+    ext_file = tmp_path / "_ext.so"
+    ext_file.write_bytes(b"")
+    mixed_refs = ["@rpath/libAlready.dylib", "/opt/homebrew/lib/libExternal.dylib"]
+    with (
+        patch("hatch_mojo.runtime.subprocess.run", return_value=SimpleNamespace(stdout="")) as mock_mac,
+        patch("hatch_mojo.runtime._get_linked_libraries", return_value=mixed_refs),
+        patch("hatch_mojo.runtime._strip_absolute_rpaths"),
+    ):
+        _patch_macos_dylibs(dylib_dir, ["libA.dylib"])
+        _patch_macos_extension(ext_file, ["libA.dylib"], ["@loader_path"])
+    mac_cmds = [c.args[0] for c in mock_mac.call_args_list]
+    assert not any("-change" in cmd for cmd in mac_cmds)
+
+    nameless_ext = BuildJob(
+        "no_mod", tmp_path / "x.mojo", ext_file, "python-extension", None, None, None, (), (), (), {}, ()
+    )
+    with patch.object(sys, "platform", "linux"):
+        assert bundle_runtime_libs(tmp_path, "build/mojo", [nameless_ext], None) == RuntimeBundleResult({}, {}, ())
+
+    with patch.object(sys, "platform", "win32"):
+        assert patch_editable_runtime(tmp_path, "build/mojo", [nameless_ext], None) == ()
+
+    mojoc_only = BuildJob(
+        "ir", tmp_path / "x.mojo", tmp_path / "x.mojoc", "mojoc", None, "package", "pkg", (), (), (), {}, ()
+    )
+    with patch.object(sys, "platform", "linux"):
+        assert patch_editable_runtime(tmp_path, "build/mojo", [mojoc_only], None) == ()
+
+
 def calls_contain_flag(call_list: Any, flag: str) -> bool:
     """Check if any call in a mock's call_args_list contains the given flag."""
     return any(flag in call.args[0] for call in call_list)

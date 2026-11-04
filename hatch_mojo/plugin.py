@@ -294,8 +294,7 @@ def _initialize_editable(
 
     _apply_zero_python_bypass(build_cfg, build_data)
     save_manifest(root, config.build_dir, [job.output_path for job in planned])
-    if editable_files:
-        save_manifest(root, config.build_dir, editable_files, filename=EDITABLE_MANIFEST_NAME)
+    save_manifest(root, config.build_dir, editable_files, filename=EDITABLE_MANIFEST_NAME)
 
 
 class MojoBuildHook(BuildHookInterface[Any]):

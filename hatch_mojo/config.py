@@ -108,14 +108,7 @@ def _validate_wheel_tag(raw_val: Any) -> str:
     if len(parts) != _PEP425_TAG_PARTS or not all(parts):
         msg = f"Invalid wheel-tag {candidate!r}; expected 'auto', 'infer', 'py3-none', or '<py>-<abi>-<plat>'"
         raise ValueError(msg)
-    try:
-        parsed = parse_tag(val)
-    except ValueError as exc:
-        msg = f"Invalid wheel-tag {candidate!r}: {exc}"
-        raise ValueError(msg) from exc
-    if not parsed:
-        msg = f"Invalid wheel-tag {candidate!r}"
-        raise ValueError(msg)
+    parse_tag(val)
     return val
 
 

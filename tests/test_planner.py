@@ -441,3 +441,54 @@ def test_plan_jobs_leveled_mixed_deps(tmp_path: Path) -> None:
     level1_names = {job.name for job in levels[1]}
     assert level0_names == {"a", "b"}
     assert level1_names == {"c"}
+
+
+def test_plan_jobs_arch_filter_excluded_glob_and_duplicate_name(tmp_path: Path) -> None:
+    (tmp_path / "src/mo").mkdir(parents=True)
+    (tmp_path / "src/mo/a.mojo").write_text("", encoding="utf-8")
+    (tmp_path / "src/mo/b.mojo").write_text("", encoding="utf-8")
+
+    filtered_cfg = parse_config(
+        {
+            "exclude": ["**/a.mojo"],
+            "jobs": [
+                {
+                    "name": "wrong_arch",
+                    "input": "src/mo/b.mojo",
+                    "emit": "python-extension",
+                    "module": "pkg._b",
+                    "arch": ["nonexistent_arch_xyz"],
+                },
+                {
+                    "name": "glob_excluded",
+                    "input": "src/mo/[a].mojo",
+                    "emit": "python-extension",
+                    "module": "pkg._a",
+                },
+            ],
+        },
+        target_name="wheel",
+    )
+    assert plan_jobs(tmp_path, filtered_cfg) == []
+
+    dup_name_cfg = parse_config(
+        {
+            "jobs": [
+                {
+                    "name": "dup",
+                    "input": "src/mo/a.mojo",
+                    "emit": "python-extension",
+                    "module": "pkg._a",
+                },
+                {
+                    "name": "dup",
+                    "input": "src/mo/b.mojo",
+                    "emit": "python-extension",
+                    "module": "pkg._b",
+                },
+            ]
+        },
+        target_name="wheel",
+    )
+    with pytest.raises(ValueError, match="Duplicate concrete job name 'dup'"):
+        plan_jobs(tmp_path, dup_name_cfg)

@@ -120,13 +120,10 @@ def build_command(mojo_bin: str, root: Path, job: BuildJob) -> list[str]:
 
 def _has_shebang(path: Path) -> bool:
     """Return True when *path* is an existing file starting with a ``#!`` shebang."""
-    try:
-        if not path.is_file():
-            return False
-        with path.open("rb") as handle:
-            return handle.read(2) == b"#!"
-    except OSError:
+    if not path.is_file():
         return False
+    with path.open("rb") as handle:
+        return handle.read(2) == b"#!"
 
 
 def _resolve_win32_mojo_bin(mojo_bin: str, root: Path) -> str:
@@ -161,21 +158,25 @@ def _compiler_fingerprint(mojo_bin: str, root: Path) -> tuple[str, int | None, i
         return (resolved, None, None)
 
 
+def _load_cache_unlocked(cache_file: Path) -> dict[str, str]:
+    """Read and validate a string-to-string JSON mapping from *cache_file*."""
+    if not cache_file.is_file():
+        return {}
+    try:
+        payload = json.loads(cache_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {str(key): str(val) for key, val in payload.items()}
+
+
 def _read_cache(cache_dir: Path | None) -> dict[str, str]:
     """Load ``cache.json`` from *cache_dir* thread-safely."""
     if cache_dir is None:
         return {}
-    cache_file = cache_dir / CACHE_FILENAME
     with _CACHE_LOCK:
-        if not cache_file.is_file():
-            return {}
-        try:
-            payload = json.loads(cache_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-    if not isinstance(payload, dict):
-        return {}
-    return {str(key): str(val) for key, val in payload.items()}
+        return _load_cache_unlocked(cache_dir / CACHE_FILENAME)
 
 
 def _record_cache_result(
@@ -191,14 +192,7 @@ def _record_cache_result(
         if job.output_path.is_file():
             raw_artifact.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(job.output_path, raw_artifact)
-        existing: dict[str, str] = {}
-        if cache_file.is_file():
-            try:
-                loaded = json.loads(cache_file.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    existing = {str(k): str(v) for k, v in loaded.items()}
-            except (OSError, ValueError):
-                existing = {}
+        existing = _load_cache_unlocked(cache_file)
         existing[job.name] = digest
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_file.write_text(json.dumps(existing, indent=2, sort_keys=True), encoding="utf-8")
@@ -222,28 +216,21 @@ def _collect_source_tree_hashes(
     if job.input_path.is_file():
         tracked.add(job.input_path.resolve())
 
-    input_parent = job.input_path.parent
-    if input_parent.is_dir():
-        for pattern in ("*.mojo", "*.mojoc"):
-            for candidate in input_parent.rglob(pattern):
-                if not candidate.is_file():
-                    continue
-                res = candidate.resolve()
-                if raw_dir is not None and res.is_relative_to(raw_dir):
-                    continue
-                if not cache_explicit and resolved_cache is not None and res.is_relative_to(resolved_cache):
-                    continue
-                tracked.add(res)
-
-    for inc_dir in explicit_incs:
-        if not inc_dir.is_dir():
+    scan_roots: list[tuple[Path, bool]] = [
+        (job.input_path.parent, not cache_explicit),
+        *((inc_dir, False) for inc_dir in explicit_incs),
+    ]
+    for scan_dir, skip_cache_dir in scan_roots:
+        if not scan_dir.is_dir():
             continue
         for pattern in ("*.mojo", "*.mojoc"):
-            for candidate in inc_dir.rglob(pattern):
+            for candidate in scan_dir.rglob(pattern):
                 if not candidate.is_file():
                     continue
                 res = candidate.resolve()
                 if raw_dir is not None and res.is_relative_to(raw_dir):
+                    continue
+                if skip_cache_dir and resolved_cache is not None and res.is_relative_to(resolved_cache):
                     continue
                 tracked.add(res)
 

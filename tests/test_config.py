@@ -488,3 +488,55 @@ def test_parse_config_wheel_tag_variants_and_validation(monkeypatch: pytest.Monk
     for bad_tag in ("", "bad", "py3-none-", "-none-any", "a-b-c-d"):
         with pytest.raises(ValueError, match="wheel-tag"):
             parse_config({"wheel-tag": bad_tag, "jobs": [job]}, target_name="wheel")
+
+
+def test_parse_config_type_errors_and_validation_edges(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HATCH_MOJO_CACHE", "   ")
+    sdist_empty = parse_config(None, target_name="sdist")
+    assert sdist_empty.jobs == ()
+    monkeypatch.delenv("HATCH_MOJO_CACHE", raising=False)
+
+    monkeypatch.setenv("HATCH_MOJO_SKIP_EDITABLE", "off")
+    str_list_cfg = parse_config(
+        {
+            "include": "src/keep/**/*.mojo",
+            "profiles": {"base": {"marker": None}},
+            "sources": [
+                {
+                    "name": "kept",
+                    "profiles": "base",
+                    "input": "src/keep/core.mojo",
+                    "emit": "python-extension",
+                    "module": "pkg._core",
+                    "output": None,
+                },
+                {
+                    "name": "outside_include",
+                    "input": "src/other/skip.mojo",
+                    "emit": "python-extension",
+                    "module": "pkg._skip",
+                },
+            ],
+        },
+        target_name="wheel",
+    )
+    assert [j.name for j in str_list_cfg.jobs] == ["kept"]
+    assert str_list_cfg.excluded_jobs == ("outside_include",)
+    assert str_list_cfg.skip_editable is False
+    monkeypatch.delenv("HATCH_MOJO_SKIP_EDITABLE", raising=False)
+
+    valid_job = {"name": "core", "input": "core.mojo", "emit": "python-extension", "module": "pkg._core"}
+    with pytest.raises(TypeError, match="Expected list or string"):
+        parse_config({"include": 123, "jobs": [valid_job]}, target_name="wheel")
+    with pytest.raises(TypeError, match="Expected bool"):
+        parse_config({"parallel": "yes", "jobs": [valid_job]}, target_name="wheel")
+    with pytest.raises(TypeError, match="env must be a dict"):
+        parse_config({"jobs": [{**valid_job, "env": "bad"}]}, target_name="wheel")
+    with pytest.raises(TypeError, match=r"jobs\[0\] must be an object"):
+        parse_config({"jobs": ["bad"]}, target_name="wheel")
+    with pytest.raises(ValueError, match="missing required 'input'"):
+        parse_config({"jobs": [{"name": "no_in", "emit": "python-extension", "module": "pkg._x"}]}, target_name="wheel")
+    with pytest.raises(ValueError, match="invalid emit"):
+        parse_config({"jobs": [{"name": "bad_emit", "input": "a.mojo", "emit": "bogus"}]}, target_name="wheel")
+    with pytest.raises(ValueError, match="requires 'module'"):
+        parse_config({"jobs": [{"name": "no_mod", "input": "a.mojo", "emit": "python-extension"}]}, target_name="wheel")

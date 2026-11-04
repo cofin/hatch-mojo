@@ -311,3 +311,42 @@ def test_register_artifacts_wheel_tag_py3_none_and_custom_and_darwin_compat(
     monkeypatch.setattr("hatch_mojo.artifacts.process_macos_plat_tag", _fake_process_macos)
     assert resolve_host_platform_tag(macos_max_compat=True) == "macosx_11_0_arm64"
     assert captured_compat == [("macosx_14_0_arm64", True)]
+
+
+def test_register_artifacts_missing_install_path_and_sdist_and_custom_native_tag(tmp_path: Path) -> None:
+    missing_path_job = BuildJob(
+        "lib", tmp_path / "lib.mojo", tmp_path / "lib.so", "shared-lib", None, "package", None, (), (), (), {}, ()
+    )
+    with pytest.raises(ValueError, match="missing install mapping"):
+        resolve_install_target(missing_path_job)
+
+    ext_job = BuildJob(
+        "ext",
+        tmp_path / "ext.mojo",
+        tmp_path / "_ext.so",
+        "python-extension",
+        "pkg._ext",
+        None,
+        None,
+        (),
+        (),
+        (),
+        {},
+        (),
+    )
+    sdist_bd: dict[str, Any] = {}
+    register_artifacts(root=tmp_path, build_data=sdist_bd, jobs=[ext_job], target_name="sdist")
+    assert "pure_python" not in sdist_bd
+    assert "infer_tag" not in sdist_bd
+
+    custom_native_bd: dict[str, Any] = {}
+    register_artifacts(
+        root=tmp_path,
+        build_data=custom_native_bd,
+        jobs=[ext_job],
+        target_name="wheel",
+        wheel_tag="cp312-abi3-manylinux_2_34_x86_64",
+    )
+    assert custom_native_bd["pure_python"] is False
+    assert custom_native_bd["infer_tag"] is False
+    assert custom_native_bd["tag"] == "cp312-abi3-manylinux_2_34_x86_64"

@@ -97,3 +97,14 @@ def test_clean_from_manifest_removes_cache_json_and_raw_dir(tmp_path: Path) -> N
     assert not (build_root / ".raw").exists()
     assert not cache_file.exists()
     assert not build_root.exists()
+
+
+def test_clean_from_manifest_removes_orphan_cache_without_manifest(tmp_path: Path) -> None:
+    build_root = tmp_path / "build" / "mojo"
+    cache_file = build_root / "cache.json"
+    cache_file.parent.mkdir(parents=True)
+    cache_file.write_text('{"core": "abc123"}', encoding="utf-8")
+
+    clean_from_manifest(tmp_path, "build/mojo")
+    assert not cache_file.exists()
+    assert not build_root.exists()

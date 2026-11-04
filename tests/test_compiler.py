@@ -388,3 +388,121 @@ def test_compile_job_cache_disabled_always_compiles(tmp_path: Path) -> None:
     assert ok2 is True
     assert int(counter.read_text(encoding="utf-8")) == 2
     assert not (cache_dir / CACHE_FILENAME).exists()
+
+
+def test_discover_mojo_package_import_error_and_missing_binary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("HATCH_MOJO_BIN", raising=False)
+    monkeypatch.setitem(sys.modules, "mojo", None)
+    monkeypatch.setitem(sys.modules, "mojo._package_root", None)
+    monkeypatch.setattr("hatch_mojo.compiler.shutil.which", lambda _: "/usr/bin/fallback-mojo")
+    assert discover_mojo(tmp_path, None) == "/usr/bin/fallback-mojo"
+
+    empty_sdk = tmp_path / "empty_sdk"
+    empty_sdk.mkdir()
+    real_import = importlib.import_module
+
+    def fake_import_empty(name: str, package: str | None = None) -> object:
+        if name == "mojo._package_root":
+            return SimpleNamespace(get_package_root=lambda: str(empty_sdk))
+        return real_import(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import_empty)
+    assert discover_mojo(tmp_path, None) == "/usr/bin/fallback-mojo"
+
+
+def test_compile_job_win32_suffix_probing_and_non_shebang_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("hatch_mojo.compiler.sys.platform", "win32")
+    monkeypatch.setattr("hatch_mojo.compiler.shutil.which", lambda _: None)
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    cmd_shim = tools_dir / "mojo.cmd"
+    cmd_shim.write_text("@echo off\r\n", encoding="utf-8")
+    plain_file = tmp_path / "plain_bin"
+    plain_file.write_bytes(b"MZ-no-shebang")
+
+    captured: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.append(list(cmd))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("hatch_mojo.compiler.subprocess.run", fake_run)
+    job = _job(tmp_path)
+
+    ok_probed, _ = compile_job(mojo_bin="tools/mojo", root=tmp_path, job=job)
+    assert ok_probed is True
+    assert captured[-1][0] == "tools/mojo.cmd"
+
+    ok_plain, _ = compile_job(mojo_bin="plain_bin", root=tmp_path, job=job)
+    assert ok_plain is True
+    assert captured[-1][0] == "plain_bin"
+
+    ok_missing, _ = compile_job(mojo_bin="tools/missing_mojo", root=tmp_path, job=job)
+    assert ok_missing is True
+    assert captured[-1][0] == "tools/missing_mojo"
+
+    ok_missing_exe, _ = compile_job(mojo_bin="tools/missing.exe", root=tmp_path, job=job)
+    assert ok_missing_exe is True
+    assert captured[-1][0] == "tools/missing.exe"
+
+
+def test_compute_job_digest_and_cache_edge_cases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("hatch_mojo.compiler.shutil.which", lambda _: None)
+    root = tmp_path / "project"
+    root.mkdir()
+    ext_src = tmp_path / "external_dir" / "ext.mojo"
+    ext_src.parent.mkdir()
+    ext_src.write_text("def ext(): pass\n", encoding="utf-8")
+    (ext_src.parent / "dir_named.mojo").mkdir()
+
+    cache_dir = root / "build" / "mojo"
+    raw_dir = cache_dir / RAW_CACHE_DIRNAME
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "ignored_raw.mojoc").write_bytes(b"raw-bytes")
+    (cache_dir / "explicit_ir.mojoc").write_bytes(b"explicit-ir")
+
+    job_missing_in = BuildJob(
+        name="missing_in",
+        input_path=root / "nonexistent_dir" / "missing.mojo",
+        output_path=root / "build" / "out.so",
+        emit="python-extension",
+        module="pkg._out",
+        install_kind=None,
+        install_path=None,
+        include_dirs=("missing_inc", str(cache_dir)),
+        defines=(),
+        flags=("-O3",),
+        env={},
+        depends_on=(),
+    )
+    d_none_cache = compute_job_digest(mojo_bin="unstatable-mojo", root=root, job=job_missing_in, cache_dir=None)
+    assert len(d_none_cache) == 64
+
+    (cache_dir / CACHE_FILENAME).write_text("{corrupt-json", encoding="utf-8")
+    d_corrupt = compute_job_digest(mojo_bin="unstatable-mojo", root=root, job=job_missing_in, cache_dir=cache_dir)
+    (cache_dir / CACHE_FILENAME).write_text("[1, 2, 3]", encoding="utf-8")
+    d_list = compute_job_digest(mojo_bin="unstatable-mojo", root=root, job=job_missing_in, cache_dir=cache_dir)
+    assert d_corrupt == d_list
+
+    ext_job = replace(job_missing_in, name="ext_job", input_path=ext_src)
+    d_ext_1 = compute_job_digest(mojo_bin="unstatable-mojo", root=root, job=ext_job, cache_dir=cache_dir)
+    (raw_dir / "ignored_raw.mojoc").write_bytes(b"raw-bytes-mutated")
+    assert d_ext_1 == compute_job_digest(mojo_bin="unstatable-mojo", root=root, job=ext_job, cache_dir=cache_dir)
+
+    monkeypatch.setattr(
+        "hatch_mojo.compiler.subprocess.run",
+        lambda cmd, **_kw: subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr=""),
+    )
+    ok, _ = compile_job(mojo_bin="unstatable-mojo", root=root, job=ext_job, use_cache=True, cache_dir=cache_dir)
+    assert ok is True
+    saved_cache = json.loads((cache_dir / CACHE_FILENAME).read_text(encoding="utf-8"))
+    assert saved_cache["ext_job"] == d_ext_1

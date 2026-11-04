@@ -296,7 +296,10 @@ def _get_linked_libraries(target: Path) -> list[str]:
 
 
 def _resolve_modular_dependencies(entry_point: Path, modular_lib: Path) -> set[str]:
-    """Recursively find all Modular runtime dependencies for an entry point."""
+    """Recursively find all Modular runtime dependencies for *entry_point*.
+
+    Standard system libraries are excluded by retaining only filenames present in *modular_lib*.
+    """
     seen: set[str] = set()
     queue: list[Path] = [entry_point]
 
@@ -308,8 +311,6 @@ def _resolve_modular_dependencies(entry_point: Path, modular_lib: Path) -> set[s
             lib_path = Path(lib_path_str)
             filename = lib_path.name
 
-            # Exclude standard system libraries by only keeping those
-            # that exist inside the modular_lib directory.
             if filename not in seen:
                 candidate_path = modular_lib / filename
                 if candidate_path.exists():
@@ -393,11 +394,8 @@ def _patch_macos_dylibs(libs_dir: Path, lib_filenames: list[str]) -> None:
     """
     for filename in lib_filenames:
         target = libs_dir / filename
-        # Strip residual absolute RPATHs from SDK build environment
         _strip_absolute_rpaths(target)
-        # Change own identity
         _run_install_name_tool(["-id", f"@rpath/{filename}", str(target)])
-        # Rewrite sibling references
         linked = _get_linked_libraries(target)
         for ref in linked:
             if ref.startswith(("@rpath/", "@loader_path/")):
