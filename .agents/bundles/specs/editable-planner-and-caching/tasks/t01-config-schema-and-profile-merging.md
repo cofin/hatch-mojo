@@ -3,7 +3,7 @@ type: Task
 id: editable-planner-and-caching:t01
 title: "Deep-merge profile sequences/dicts, tighten jobs/install validation, and add skip-editable=false & cache=true defaults"
 description: "Concatenate profile flags/lists, validate jobs/install shapes strictly, and add skip_editable=False and cache=True defaults with env overrides."
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on: []
@@ -13,19 +13,19 @@ tests:
   - tests/test_config.py
   - tests/test_plugin.py
 plan_revision: 3
-plan_commit: null
-state_revision: 0
-claimed_by: null
-claimed_at: null
+plan_commit: ad4930f
+state_revision: 2
+claimed_by: agent:executor
+claimed_at: 2026-11-04T19:36:15Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-04T19:40:39Z
+last_verified_commit: 6c0e47f
+verification_evidence: "uv run pytest tests/test_config.py tests/test_plugin.py -q (37 passed); ruff/mypy/pyright/slotscheck exit 0"
 created_at: 2026-11-04T05:05:00Z
-updated_at: 2026-11-04T06:13:00Z
-commit: null
+updated_at: 2026-11-04T19:40:39Z
+commit: 6c0e47f
 tags: [bugfix, config, profiles, editable, cache]
 ---
 
@@ -73,10 +73,10 @@ uv run pytest tests/test_config.py tests/test_plugin.py -q
 
 ## Acceptance Criteria
 
-- [ ] `parse_config({"jobs": {}}, target_name="wheel")` raises `TypeError` (`R1`).
-- [ ] Profile + job merging preserves repeated `flags` tokens in order, deduplicates `include-dirs`/`defines`/`depends-on`, and merges `env` dicts (`R1`).
-- [ ] `HookConfig` defaults to `skip_editable=False` and `cache=True`, honoring `HATCH_MOJO_SKIP_EDITABLE` and `HATCH_MOJO_CACHE` (`R1`).
-- [ ] `ruff`, `mypy`, `pyright`, `slotscheck`, and focused `pytest` modules exit `0`.
+- [x] `parse_config({"jobs": {}}, target_name="wheel")` raises `TypeError` (`R1`).
+- [x] Profile + job merging preserves repeated `flags` tokens in order, deduplicates `include-dirs`/`defines`/`depends-on`, and merges `env` dicts (`R1`).
+- [x] `HookConfig` defaults to `skip_editable=False` and `cache=True`, honoring `HATCH_MOJO_SKIP_EDITABLE` and `HATCH_MOJO_CACHE` (`R1`).
+- [x] `ruff`, `mypy`, `pyright`, `slotscheck`, and focused `pytest` modules exit `0`.
 
 ## Notes & Discoveries
 

@@ -3,7 +3,7 @@ type: Task
 id: editable-planner-and-caching:t04
 title: "Add thread-safe SHA-256 cache.json incremental compilation and cleanup integration"
 description: "Cache SHA-256 job digests and pristine .raw compiler outputs thread-safely in compile_job, restoring clean binaries on cache hits and cleaning cache state."
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -18,19 +18,19 @@ tests:
   - tests/test_plugin.py
   - tests/test_integration_compile.py
 plan_revision: 3
-plan_commit: null
-state_revision: 0
+plan_commit: ad4930f
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-04T20:02:09Z
+last_verified_commit: 5731ab7
+verification_evidence: "uv run pytest -q (163 passed); ruff check, ruff format --check, mypy, pyright, slotscheck exit 0"
 created_at: 2026-11-04T05:05:00Z
-updated_at: 2026-11-04T06:04:00Z
-commit: null
+updated_at: 2026-11-04T20:02:52Z
+commit: 5731ab7
 tags: [performance, compiler, cache, sha256]
 ---
 
@@ -77,10 +77,10 @@ uv run pytest -q
 
 ## Acceptance Criteria
 
-- [ ] `compute_job_digest` incorporates compiler stat metadata, flags/defines/env, `input_path`, linked `flags` files, upstream `depends_on` digests, and recursive `*.mojo`/`*.mojoc` files in `input_path.parent` and `include_dirs` (`R4`).
-- [ ] `compile_job` restores pristine unpatched binaries from `<build_dir>/.raw/<digest><suffix>` on cache hit when `use_cache=True`, and updates `.raw/` + `<build_dir>/cache.json` thread-safely on compile success (`R4`).
-- [ ] `clean_from_manifest` removes `cache.json` and `.raw/` and prunes empty directories (`R4`).
-- [ ] Full static analysis and `pytest` suite exit `0`.
+- [x] `compute_job_digest` incorporates compiler stat metadata, flags/defines/env, `input_path`, linked `flags` files, upstream `depends_on` digests, and recursive `*.mojo`/`*.mojoc` files in `input_path.parent` and `include_dirs` (`R4`).
+- [x] `compile_job` restores pristine unpatched binaries from `<build_dir>/.raw/<digest><suffix>` on cache hit when `use_cache=True`, and updates `.raw/` + `<build_dir>/cache.json` thread-safely on compile success (`R4`).
+- [x] `clean_from_manifest` removes `cache.json` and `.raw/` and prunes empty directories (`R4`).
+- [x] Full static analysis and `pytest` suite exit `0`.
 
 ## Notes & Discoveries
 

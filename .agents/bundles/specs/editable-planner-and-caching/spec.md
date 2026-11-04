@@ -3,17 +3,17 @@ type: Spec
 flow_id: editable-planner-and-caching
 title: "Editable Installs, Glob/DAG Planner Fixes & Digest Build Cache"
 description: "Deliver working editable installs with SDK-direct RPATHs, deep profile merging, collision-free multi-file globs, fail-fast filtering, and SHA-256 build caching."
-state: planned
+state: completed
 parent_prd: v0-2-overhaul
 research:
   - ../v0-2-overhaul/research/mojo-packaging-landscape-audit_20261104.md
 plan_revision: 3
-plan_commit: null
-state_revision: 0
+plan_commit: ad4930f
+state_revision: 5
 current_task: null
-last_verified_checkpoint: null
+last_verified_checkpoint: 5731ab7
 created_at: 2026-11-04T05:05:00Z
-updated_at: 2026-11-04T06:04:00Z
+updated_at: 2026-11-04T20:03:00Z
 tags: [feature, editable, planner, config, caching]
 ---
 
@@ -90,16 +90,16 @@ Even after CLI and Hatchling `finalize` alignment, developer ergonomics and mult
 ## 4. Implementation Plan
 
 ### Phase 1: Config, Planner, Editable & Digest Cache Overhaul
-- [ ] t01 — Deep-merge profile sequences/dicts, tighten `jobs`/`install` validation, and add `skip-editable=false` & `cache=true` defaults (tasks/t01-config-schema-and-profile-merging.md)
-- [ ] t02 — Add `pathspec` glob filtering, `{stem}` multi-input outputs, and expanded `depends-on` DAG edges (tasks/t02-planner-globs-and-dag-edges.md)
-- [ ] t03 — Implement `patch_editable_runtime`, `build_config`-aware editable placement, and `fail-fast = false` filtering (tasks/t03-editable-install-and-fail-fast.md)
-- [ ] t04 — Add thread-safe SHA-256 `cache.json` incremental compilation and cleanup integration (tasks/t04-digest-build-cache.md)
+- [x] [6c0e47f] t01 — Deep-merge profile sequences/dicts, tighten `jobs`/`install` validation, and add `skip-editable=false` & `cache=true` defaults (tasks/t01-config-schema-and-profile-merging.md)
+- [x] [6616de5] t02 — Add `pathspec` glob filtering, `{stem}` multi-input outputs, and expanded `depends-on` DAG edges (tasks/t02-planner-globs-and-dag-edges.md)
+- [x] [9b6a300] t03 — Implement `patch_editable_runtime`, `build_config`-aware editable placement, and `fail-fast = false` filtering (tasks/t03-editable-install-and-fail-fast.md)
+- [x] [5731ab7] t04 — Add thread-safe SHA-256 `cache.json` incremental compilation and cleanup integration (tasks/t04-digest-build-cache.md)
 - **Phase 1 Recovery Checkpoint**: `uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run pyright && uv run slotscheck hatch_mojo && uv run pytest -q`
 
 ## 5. Continuity Snapshot
-- **Flow ID**: `editable-planner-and-caching` (`state: planned`, `plan_revision: 3`, `plan_commit: null`)
+- **Flow ID**: `editable-planner-and-caching` (`state: completed`, `plan_revision: 3`, `plan_commit: ad4930f`)
 - **Current Task**: `null`
-- **Last Verified Checkpoint**: `null`
+- **Last Verified Checkpoint**: `5731ab7`
 - **Key Decisions**:
   - `skip-editable` defaults to `false` with `HATCH_MOJO_SKIP_EDITABLE` override; editable RPATHs point directly to persistent `modular_lib` and fall back to `<build_dir>/editable.libs` when `_is_ephemeral_sdk` matches `tempfile.gettempdir()`, `builds-v0`, `.tmp*`, or `pip-build-env-*`.
   - `flags` concatenate verbatim across profiles without `set()` deduplication so repeated `-Xlinker` pairs remain intact.

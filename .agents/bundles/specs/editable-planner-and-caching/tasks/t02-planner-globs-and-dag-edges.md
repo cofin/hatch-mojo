@@ -3,7 +3,7 @@ type: Task
 id: editable-planner-and-caching:t02
 title: "Add pathspec glob filtering, {stem} multi-input outputs, and expanded depends-on DAG edges"
 description: "Evaluate GitIgnoreSpec globs across literal and globbed jobs, expand {stem} output/module/install templates with collision checks, and rewrite depends-on DAG edges."
-state: pending
+state: completed
 priority: P1
 verification_strategy: regression_tdd
 depends_on:
@@ -16,19 +16,19 @@ tests:
   - tests/test_planner.py
   - tests/test_plugin.py
 plan_revision: 3
-plan_commit: null
-state_revision: 0
-claimed_by: null
-claimed_at: null
+plan_commit: ad4930f
+state_revision: 2
+claimed_by: agent:executor
+claimed_at: 2026-11-04T19:41:00Z
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-04T19:46:07Z
+last_verified_commit: 6616de5
+verification_evidence: "uv run pytest tests/test_config.py tests/test_planner.py tests/test_plugin.py -q (55 passed); ruff/mypy/pyright/slotscheck exit 0"
 created_at: 2026-11-04T05:05:00Z
-updated_at: 2026-11-04T06:13:00Z
-commit: null
+updated_at: 2026-11-04T19:46:07Z
+commit: 6616de5
 tags: [bugfix, planner, globs, dag, pathspec]
 ---
 
@@ -76,10 +76,10 @@ uv run pytest tests/test_config.py tests/test_planner.py -q
 
 ## Acceptance Criteria
 
-- [ ] `include` and `exclude` support git-style `**` zero-or-more-directory globs across both literal and globbed `input` patterns (`R2`).
-- [ ] Multi-file globs expand `{stem}` into distinct `module` and `output_path` targets and raise `ValueError` on colliding fixed modules/outputs (`R2`, `HBP-05`).
-- [ ] Downstream `depends-on` references to globbed or platform-filtered job names rewrite cleanly without false `"unknown dependencies"` errors, while genuinely unknown job names still raise `ValueError` (`R2`, `HBP-05`).
-- [ ] `ruff`, `mypy`, `pyright`, `slotscheck`, and focused `pytest` modules exit `0`.
+- [x] `include` and `exclude` support git-style `**` zero-or-more-directory globs across both literal and globbed `input` patterns (`R2`).
+- [x] Multi-file globs expand `{stem}` into distinct `module` and `output_path` targets and raise `ValueError` on colliding fixed modules/outputs (`R2`, `HBP-05`).
+- [x] Downstream `depends-on` references to globbed or platform-filtered job names rewrite cleanly without false `"unknown dependencies"` errors, while genuinely unknown job names still raise `ValueError` (`R2`, `HBP-05`).
+- [x] `ruff`, `mypy`, `pyright`, `slotscheck`, and focused `pytest` modules exit `0`.
 
 ## Notes & Discoveries
 

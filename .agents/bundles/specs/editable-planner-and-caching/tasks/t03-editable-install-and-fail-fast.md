@@ -3,7 +3,7 @@ type: Task
 id: editable-planner-and-caching:t03
 title: "Implement patch_editable_runtime, build_config-aware editable placement, and fail-fast = false filtering"
 description: "Place editable artifacts cleanly across .pth and dev_mode_exact modes, patch editable RPATHs without mutating build_dir outputs, and filter fail-fast=false failures."
-state: pending
+state: completed
 priority: P1
 verification_strategy: behavior_tdd
 depends_on:
@@ -16,19 +16,19 @@ tests:
   - tests/test_plugin.py
   - tests/test_integration_wheel.py
 plan_revision: 3
-plan_commit: null
-state_revision: 0
+plan_commit: ad4930f
+state_revision: 2
 claimed_by: null
 claimed_at: null
 blocked_reason: null
 unblock_condition: null
 next_step: null
-last_verified_at: null
-last_verified_commit: null
-verification_evidence: null
+last_verified_at: 2026-11-04T19:55:11Z
+last_verified_commit: 9b6a300
+verification_evidence: "uv run pytest tests/test_runtime.py tests/test_plugin.py tests/test_integration_wheel.py -q (88 passed); ruff, mypy, pyright, slotscheck exit 0"
 created_at: 2026-11-04T05:05:00Z
-updated_at: 2026-11-04T06:04:00Z
-commit: null
+updated_at: 2026-11-04T19:56:04Z
+commit: 9b6a300
 tags: [feature, editable, rpath, fail-fast, hatchling]
 ---
 
@@ -76,10 +76,10 @@ uv run pytest tests/test_runtime.py tests/test_plugin.py tests/test_integration_
 
 ## Acceptance Criteria
 
-- [ ] `patch_editable_runtime` embeds persistent `modular_lib` RPATHs directly without copying libraries, and stages `<build_dir>/editable.libs` when `modular_lib` resides in an external tempdir (`R3`).
-- [ ] Editable installs resolve custom `build_config.packages` layouts, support `dev_mode_exact` via `force_include_editable`, and avoid duplicating source-copied `.so` files into `site-packages` (`R3`).
-- [ ] `fail-fast = false` filters failed jobs and their dependents before runtime bundling and artifact registration (`R3`).
-- [ ] `ruff`, `mypy`, `pyright`, `slotscheck`, and focused `pytest` modules exit `0`.
+- [x] `patch_editable_runtime` embeds persistent `modular_lib` RPATHs directly without copying libraries, and stages `<build_dir>/editable.libs` when `modular_lib` resides in an external tempdir (`R3`).
+- [x] Editable installs resolve custom `build_config.packages` layouts, support `dev_mode_exact` via `force_include_editable`, and avoid duplicating source-copied `.so` files into `site-packages` (`R3`).
+- [x] `fail-fast = false` filters failed jobs and their dependents before runtime bundling and artifact registration (`R3`).
+- [x] `ruff`, `mypy`, `pyright`, `slotscheck`, and focused `pytest` modules exit `0`.
 
 ## Notes & Discoveries
 
