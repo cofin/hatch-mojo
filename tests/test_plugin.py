@@ -576,3 +576,27 @@ def test_initialize_editable_dev_mode_exact_copies_submodules_and_preserves_forc
     assert fi_editable["/existing/readme.txt"] == "readme.txt"
     assert "_top.so" in fi_editable.values()
     assert "my_pkg/_core.so" not in fi_editable.values()
+
+
+def test_initialize_forwards_cache_settings_to_compile_job(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = SimpleNamespace(display_warning=lambda *_a: None, display_debug=lambda *_a: None)
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app)
+    job = _job(tmp_path)
+    recorded: list[tuple[bool, Path | None]] = []
+
+    def _capture_compile(**kwargs: Any) -> tuple[bool, str]:
+        recorded.append((kwargs["use_cache"], kwargs["cache_dir"]))
+        return True, "ok"
+
+    monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_a, **_kw: _config(bundle_libs=False, cache=False))
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_a, **_kw: [job])
+    monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_a, **_kw: "mojo")
+    monkeypatch.setattr("hatch_mojo.plugin.compile_job", _capture_compile)
+    monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", lambda **_kw: None)
+    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_a, **_kw: tmp_path / "manifest.json")
+
+    MojoBuildHook.initialize(cast("Any", fake), "standard", {})
+    assert recorded == [(False, tmp_path / "build/mojo")]

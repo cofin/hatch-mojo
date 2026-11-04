@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import shutil
 from pathlib import Path
+
+from hatch_mojo.compiler import CACHE_FILENAME, RAW_CACHE_DIRNAME
 
 MANIFEST_NAME = "manifest.json"
 EDITABLE_MANIFEST_NAME = "editable-manifest.json"
@@ -46,11 +49,14 @@ def clean_from_manifest(
     *,
     include_editable: bool = False,
 ) -> None:
-    """Unlink tracked files from build manifests and prune empty *build_dir* directories."""
+    """Unlink tracked files from build manifests, remove build cache state, and prune empty directories."""
+    build_root = root / build_dir
     filenames = (MANIFEST_NAME, EDITABLE_MANIFEST_NAME) if include_editable else (MANIFEST_NAME,)
     manifest_paths = [manifest_path(root, build_dir, filename=name) for name in filenames]
     existing = [path for path in manifest_paths if path.exists()]
-    if not existing:
+    cache_file = build_root / CACHE_FILENAME
+    raw_dir = build_root / RAW_CACHE_DIRNAME
+    if not existing and not cache_file.exists() and not raw_dir.exists():
         return
 
     for path in existing:
@@ -61,4 +67,8 @@ def clean_from_manifest(
                 file_path.unlink()
         path.unlink(missing_ok=True)
 
-    _prune_empty_dirs(root / build_dir)
+    cache_file.unlink(missing_ok=True)
+    if raw_dir.exists():
+        shutil.rmtree(raw_dir, ignore_errors=True)
+
+    _prune_empty_dirs(build_root)

@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 import os
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from hatch_mojo.types import BuildJob
+
+CACHE_FILENAME = "cache.json"
+RAW_CACHE_DIRNAME = ".raw"
+_CACHE_LOCK = threading.Lock()
 
 
 def _discover_mojo_from_package() -> str | None:
@@ -138,10 +145,169 @@ def _resolve_win32_mojo_bin(mojo_bin: str, root: Path) -> str:
     return mojo_bin
 
 
-def compile_job(*, mojo_bin: str, root: Path, job: BuildJob, fail_fast: bool = True) -> tuple[bool, str]:
-    """Compile a single job and return status with output."""
+def _sha256_file(path: Path) -> str:
+    """Return the hex SHA-256 digest of *path*."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _compiler_fingerprint(mojo_bin: str, root: Path) -> tuple[str, int | None, int | None]:
+    """Return resolved path, nanosecond mtime, and byte size for *mojo_bin* when stat-able."""
+    resolved = shutil.which(mojo_bin) or mojo_bin
+    bin_path = Path(resolved) if Path(resolved).is_absolute() else root / resolved
+    try:
+        st = bin_path.stat()
+        return (str(bin_path.resolve()), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (resolved, None, None)
+
+
+def _read_cache(cache_dir: Path | None) -> dict[str, str]:
+    """Load ``cache.json`` from *cache_dir* thread-safely."""
+    if cache_dir is None:
+        return {}
+    cache_file = cache_dir / CACHE_FILENAME
+    with _CACHE_LOCK:
+        if not cache_file.is_file():
+            return {}
+        try:
+            payload = json.loads(cache_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {str(key): str(val) for key, val in payload.items()}
+
+
+def _record_cache_result(
+    *,
+    cache_dir: Path,
+    job: BuildJob,
+    digest: str,
+    raw_artifact: Path,
+) -> None:
+    """Persist a pristine copy of ``job.output_path`` and update ``cache.json`` under lock."""
+    cache_file = cache_dir / CACHE_FILENAME
+    with _CACHE_LOCK:
+        if job.output_path.is_file():
+            raw_artifact.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(job.output_path, raw_artifact)
+        existing: dict[str, str] = {}
+        if cache_file.is_file():
+            try:
+                loaded = json.loads(cache_file.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing = {str(k): str(v) for k, v in loaded.items()}
+            except (OSError, ValueError):
+                existing = {}
+        existing[job.name] = digest
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(json.dumps(existing, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _collect_source_tree_hashes(
+    root: Path,
+    job: BuildJob,
+    cache_dir: Path | None,
+) -> list[tuple[str, str]]:
+    """Collect deterministic ``(path_label, sha256)`` pairs for all sources, includes, and flag files."""
+    resolved_root = root.resolve()
+    resolved_cache = cache_dir.resolve() if cache_dir is not None else None
+    raw_dir = resolved_cache / RAW_CACHE_DIRNAME if resolved_cache is not None else None
+    explicit_incs = [(Path(inc) if Path(inc).is_absolute() else root / inc).resolve() for inc in job.include_dirs]
+    cache_explicit = resolved_cache is not None and any(
+        inc == resolved_cache or inc.is_relative_to(resolved_cache) for inc in explicit_incs
+    )
+
+    tracked: set[Path] = set()
+    if job.input_path.is_file():
+        tracked.add(job.input_path.resolve())
+
+    input_parent = job.input_path.parent
+    if input_parent.is_dir():
+        for pattern in ("*.mojo", "*.mojoc"):
+            for candidate in input_parent.rglob(pattern):
+                if not candidate.is_file():
+                    continue
+                res = candidate.resolve()
+                if raw_dir is not None and res.is_relative_to(raw_dir):
+                    continue
+                if not cache_explicit and resolved_cache is not None and res.is_relative_to(resolved_cache):
+                    continue
+                tracked.add(res)
+
+    for inc_dir in explicit_incs:
+        if not inc_dir.is_dir():
+            continue
+        for pattern in ("*.mojo", "*.mojoc"):
+            for candidate in inc_dir.rglob(pattern):
+                if not candidate.is_file():
+                    continue
+                res = candidate.resolve()
+                if raw_dir is not None and res.is_relative_to(raw_dir):
+                    continue
+                tracked.add(res)
+
+    for flag in job.flags:
+        flag_path = Path(flag) if Path(flag).is_absolute() else root / flag
+        if flag_path.is_file():
+            tracked.add(flag_path.resolve())
+
+    labeled: list[tuple[str, Path]] = []
+    for res in tracked:
+        label = res.relative_to(resolved_root).as_posix() if res.is_relative_to(resolved_root) else res.as_posix()
+        labeled.append((label, res))
+    labeled.sort(key=lambda item: item[0])
+    return [(label, _sha256_file(res)) for label, res in labeled]
+
+
+def compute_job_digest(
+    *,
+    mojo_bin: str,
+    root: Path,
+    job: BuildJob,
+    cache_dir: Path | None = None,
+) -> str:
+    """Compute a deterministic SHA-256 build digest for *job*."""
+    cache_map = _read_cache(cache_dir)
+    payload = {
+        "compiler": _compiler_fingerprint(mojo_bin, root),
+        "defines": list(job.defines),
+        "depends_on": [(dep, cache_map.get(dep)) for dep in job.depends_on],
+        "emit": job.emit,
+        "env": sorted(job.env.items()),
+        "files": _collect_source_tree_hashes(root, job, cache_dir),
+        "flags": list(job.flags),
+        "include_dirs": list(job.include_dirs),
+        "module": job.module,
+        "output_path": str(job.output_path),
+    }
+    encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def compile_job(
+    *,
+    mojo_bin: str,
+    root: Path,
+    job: BuildJob,
+    fail_fast: bool = True,
+    use_cache: bool = False,
+    cache_dir: Path | None = None,
+) -> tuple[bool, str]:
+    """Compile a single job and return status with output, restoring cached ``.raw`` binaries on hits."""
     if sys.platform == "win32":
         mojo_bin = _resolve_win32_mojo_bin(mojo_bin, root)
+
+    digest: str | None = None
+    raw_artifact: Path | None = None
+    if use_cache and cache_dir is not None:
+        digest = compute_job_digest(mojo_bin=mojo_bin, root=root, job=job, cache_dir=cache_dir)
+        raw_artifact = cache_dir / RAW_CACHE_DIRNAME / f"{digest}{job.output_path.suffix}"
+        if _read_cache(cache_dir).get(job.name) == digest and raw_artifact.is_file():
+            job.output_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(raw_artifact, job.output_path)
+            return True, f"job={job.name}\ncache=hit\noutput={job.output_path}"
+
     job.output_path.parent.mkdir(parents=True, exist_ok=True)
     command = build_command(mojo_bin, root, job)
     if sys.platform == "win32" and not command[0].lower().endswith((".exe", ".cmd", ".bat")):
@@ -161,6 +327,8 @@ def compile_job(*, mojo_bin: str, root: Path, job: BuildJob, fail_fast: bool = T
         ]
     ).strip()
     success = result.returncode == 0
+    if success and use_cache and cache_dir is not None and digest is not None and raw_artifact is not None:
+        _record_cache_result(cache_dir=cache_dir, job=job, digest=digest, raw_artifact=raw_artifact)
     if not success and fail_fast:
         raise RuntimeError(log)
     return success, log

@@ -140,64 +140,88 @@ def _resolve_dist_name(hook: Any) -> str | None:
     return None
 
 
-def _compile_planned_jobs(app: Any, root: Path, config: Any) -> tuple[list[BuildJob], str | None]:
-    """Plan and execute build jobs serially or across topological DAG levels, filtering failures."""
+def _compile_parallel_levels(
+    *,
+    app: Any,
+    root: Path,
+    config: Any,
+    levels: list[list[BuildJob]],
+    mojo_bin: str,
+) -> list[BuildJob]:
+    """Execute topological build levels in parallel while filtering failed jobs and dependents."""
     succeeded: list[BuildJob] = []
     failed_names: set[str] = set()
+    cache_dir = root / config.build_dir
 
-    if config.parallel:
-        levels = plan_jobs_leveled(root, config)
-        planned = [job for level in levels for job in level]
-        if not planned:
-            return [], None
-        mojo_bin = discover_mojo(root, config.mojo_bin)
-        for level in levels:
-            runnable: list[BuildJob] = []
-            for job in level:
-                blocked = sorted(dep for dep in job.depends_on if dep in failed_names)
-                if blocked:
-                    failed_names.add(job.name)
-                    app.display_warning(f"Skipping job '{job.name}' due to failed dependencies: {', '.join(blocked)}")
-                else:
-                    runnable.append(job)
-            if len(runnable) > 1:
-                with ThreadPoolExecutor() as pool:
-                    pairs = [
-                        (
-                            job,
-                            pool.submit(
-                                compile_job,
-                                mojo_bin=mojo_bin,
-                                root=root,
-                                job=job,
-                                fail_fast=config.fail_fast,
-                            ),
-                        )
-                        for job in runnable
-                    ]
-                    for job, future in pairs:
-                        success, log = future.result()
-                        if not success:
-                            failed_names.add(job.name)
-                            app.display_warning(log)
-                        else:
-                            succeeded.append(job)
-                            app.display_debug(log)
+    for level in levels:
+        runnable: list[BuildJob] = []
+        for job in level:
+            blocked = sorted(dep for dep in job.depends_on if dep in failed_names)
+            if blocked:
+                failed_names.add(job.name)
+                app.display_warning(f"Skipping job '{job.name}' due to failed dependencies: {', '.join(blocked)}")
             else:
-                for job in runnable:
-                    success, log = compile_job(mojo_bin=mojo_bin, root=root, job=job, fail_fast=config.fail_fast)
+                runnable.append(job)
+        if len(runnable) > 1:
+            with ThreadPoolExecutor() as pool:
+                pairs = [
+                    (
+                        job,
+                        pool.submit(
+                            compile_job,
+                            mojo_bin=mojo_bin,
+                            root=root,
+                            job=job,
+                            fail_fast=config.fail_fast,
+                            use_cache=config.cache,
+                            cache_dir=cache_dir,
+                        ),
+                    )
+                    for job in runnable
+                ]
+                for job, future in pairs:
+                    success, log = future.result()
                     if not success:
                         failed_names.add(job.name)
                         app.display_warning(log)
                     else:
                         succeeded.append(job)
                         app.display_debug(log)
-        return succeeded, mojo_bin
+        else:
+            for job in runnable:
+                success, log = compile_job(
+                    mojo_bin=mojo_bin,
+                    root=root,
+                    job=job,
+                    fail_fast=config.fail_fast,
+                    use_cache=config.cache,
+                    cache_dir=cache_dir,
+                )
+                if not success:
+                    failed_names.add(job.name)
+                    app.display_warning(log)
+                else:
+                    succeeded.append(job)
+                    app.display_debug(log)
+    return succeeded
+
+
+def _compile_planned_jobs(app: Any, root: Path, config: Any) -> tuple[list[BuildJob], str | None]:
+    """Plan and execute build jobs serially or across topological DAG levels, filtering failures."""
+    if config.parallel:
+        levels = plan_jobs_leveled(root, config)
+        if not any(levels):
+            return [], None
+        mojo_bin = discover_mojo(root, config.mojo_bin)
+        return _compile_parallel_levels(app=app, root=root, config=config, levels=levels, mojo_bin=mojo_bin), mojo_bin
 
     planned = plan_jobs(root, config)
     if not planned:
         return [], None
     mojo_bin = discover_mojo(root, config.mojo_bin)
+    cache_dir = root / config.build_dir
+    succeeded: list[BuildJob] = []
+    failed_names: set[str] = set()
     for job in planned:
         blocked = sorted(dep for dep in job.depends_on if dep in failed_names)
         if blocked:
@@ -209,6 +233,8 @@ def _compile_planned_jobs(app: Any, root: Path, config: Any) -> tuple[list[Build
             root=root,
             job=job,
             fail_fast=config.fail_fast,
+            use_cache=config.cache,
+            cache_dir=cache_dir,
         )
         if not success:
             failed_names.add(job.name)

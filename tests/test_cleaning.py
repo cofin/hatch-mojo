@@ -76,3 +76,24 @@ def test_editable_manifest_isolated_from_standard_clean(tmp_path: Path) -> None:
     clean_from_manifest(tmp_path, "build/mojo", include_editable=True)
     assert not edit_out.exists()
     assert not (tmp_path / "build" / "mojo").exists()
+
+
+def test_clean_from_manifest_removes_cache_json_and_raw_dir(tmp_path: Path) -> None:
+    build_root = tmp_path / "build" / "mojo"
+    out_file = build_root / "pkg" / "_core.so"
+    raw_file = build_root / ".raw" / "abc123.so"
+    cache_file = build_root / "cache.json"
+    out_file.parent.mkdir(parents=True)
+    raw_file.parent.mkdir(parents=True)
+    out_file.write_bytes(b"ext")
+    raw_file.write_bytes(b"raw")
+    cache_file.write_text('{"core": "abc123"}', encoding="utf-8")
+
+    save_manifest(tmp_path, "build/mojo", [out_file])
+    clean_from_manifest(tmp_path, "build/mojo")
+
+    assert not out_file.exists()
+    assert not raw_file.exists()
+    assert not (build_root / ".raw").exists()
+    assert not cache_file.exists()
+    assert not build_root.exists()

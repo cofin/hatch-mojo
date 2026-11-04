@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import importlib
+import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from hatch_mojo.compiler import build_command, compile_job, discover_mojo
+from hatch_mojo.compiler import (
+    CACHE_FILENAME,
+    RAW_CACHE_DIRNAME,
+    build_command,
+    compile_job,
+    compute_job_digest,
+    discover_mojo,
+)
 from hatch_mojo.types import BuildJob
 
 
@@ -260,3 +269,122 @@ def test_compile_job_win32_shebang_script_wrapped_with_python(
     ok_rel, _ = compile_job(mojo_bin="fake_mojo", root=tmp_path, job=job)
     assert ok_rel is True
     assert captured[-1][:2] == [sys.executable, "fake_mojo"]
+
+
+def test_compute_job_digest_tracks_sources_includes_flags_deps_and_skips_cache_dir(tmp_path: Path) -> None:
+    compiler_bin = tmp_path / "bin" / "mojo"
+    compiler_bin.parent.mkdir(parents=True)
+    compiler_bin.write_bytes(b"mojo-v1")
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    entry = src_dir / "main.mojo"
+    sibling = src_dir / "helper.mojo"
+    entry.write_text("def main(): pass\n", encoding="utf-8")
+    sibling.write_text("def helper(): pass\n", encoding="utf-8")
+
+    cache_dir = src_dir / "build_cache"
+    raw_dir = cache_dir / RAW_CACHE_DIRNAME
+    raw_dir.mkdir(parents=True)
+    (cache_dir / "cached_ignored.mojoc").write_bytes(b"ignored-ir")
+
+    inc_dir = tmp_path / "include"
+    nested_inc = inc_dir / "sub"
+    nested_inc.mkdir(parents=True)
+    header_mojoc = nested_inc / "api.mojoc"
+    header_mojoc.write_bytes(b"ir-v1")
+
+    linked_obj = tmp_path / "build" / "kernel.o"
+    linked_obj.parent.mkdir(parents=True)
+    linked_obj.write_bytes(b"obj-v1")
+
+    (cache_dir / CACHE_FILENAME).write_text(json.dumps({"upstream": "digest-up-1"}), encoding="utf-8")
+
+    base_job = BuildJob(
+        name="app",
+        input_path=entry,
+        output_path=tmp_path / "build" / "app.so",
+        emit="python-extension",
+        module="pkg._app",
+        install_kind=None,
+        install_path=None,
+        include_dirs=("include",),
+        defines=("OPT=1",),
+        flags=("build/kernel.o",),
+        env={"MOJO_FLAG": "a"},
+        depends_on=("upstream",),
+    )
+
+    d0 = compute_job_digest(mojo_bin=str(compiler_bin), root=tmp_path, job=base_job, cache_dir=cache_dir)
+    assert d0 == compute_job_digest(mojo_bin=str(compiler_bin), root=tmp_path, job=base_job, cache_dir=cache_dir)
+
+    (cache_dir / "cached_ignored.mojoc").write_bytes(b"changed-ignored-ir")
+    assert d0 == compute_job_digest(mojo_bin=str(compiler_bin), root=tmp_path, job=base_job, cache_dir=cache_dir)
+
+    sibling.write_text("def helper(): return 1\n", encoding="utf-8")
+    d_sibling = compute_job_digest(mojo_bin=str(compiler_bin), root=tmp_path, job=base_job, cache_dir=cache_dir)
+    assert d_sibling != d0
+
+    header_mojoc.write_bytes(b"ir-v2")
+    d_inc = compute_job_digest(mojo_bin=str(compiler_bin), root=tmp_path, job=base_job, cache_dir=cache_dir)
+    assert d_inc != d_sibling
+
+    linked_obj.write_bytes(b"obj-v2")
+    d_obj = compute_job_digest(mojo_bin=str(compiler_bin), root=tmp_path, job=base_job, cache_dir=cache_dir)
+    assert d_obj != d_inc
+
+    (cache_dir / CACHE_FILENAME).write_text(json.dumps({"upstream": "digest-up-2"}), encoding="utf-8")
+    d_dep = compute_job_digest(mojo_bin=str(compiler_bin), root=tmp_path, job=base_job, cache_dir=cache_dir)
+    assert d_dep != d_obj
+
+    env_job = replace(base_job, env={"MOJO_FLAG": "b"})
+    d_env = compute_job_digest(mojo_bin=str(compiler_bin), root=tmp_path, job=env_job, cache_dir=cache_dir)
+    assert d_env != d_dep
+
+    compiler_bin.write_bytes(b"mojo-v2-longer-binary")
+    d_comp = compute_job_digest(mojo_bin=str(compiler_bin), root=tmp_path, job=env_job, cache_dir=cache_dir)
+    assert d_comp != d_env
+
+
+def test_compile_job_cache_disabled_always_compiles(tmp_path: Path) -> None:
+    counter = tmp_path / "count.txt"
+    counter.write_text("0", encoding="utf-8")
+    fake_mojo = tmp_path / "fake_mojo"
+    fake_mojo.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        f"c = pathlib.Path({str(counter)!r})\n"
+        "n = int(c.read_text()) + 1\n"
+        "c.write_text(str(n))\n"
+        "out = pathlib.Path(sys.argv[sys.argv.index('-o') + 1])\n"
+        "out.parent.mkdir(parents=True, exist_ok=True)\n"
+        "out.write_bytes(f'bin-{n}'.encode())\n",
+        encoding="utf-8",
+    )
+    fake_mojo.chmod(0o755)
+
+    src = tmp_path / "src" / "core.mojo"
+    src.parent.mkdir(parents=True)
+    src.write_text("def f(): pass\n", encoding="utf-8")
+    job = BuildJob(
+        name="core",
+        input_path=src,
+        output_path=tmp_path / "out" / "_core.so",
+        emit="python-extension",
+        module="pkg._core",
+        install_kind=None,
+        install_path=None,
+        include_dirs=(),
+        defines=(),
+        flags=(),
+        env={},
+        depends_on=(),
+    )
+    cache_dir = tmp_path / "build" / "mojo"
+
+    ok1, _ = compile_job(mojo_bin=str(fake_mojo), root=tmp_path, job=job, use_cache=False, cache_dir=cache_dir)
+    ok2, _ = compile_job(mojo_bin=str(fake_mojo), root=tmp_path, job=job, use_cache=False, cache_dir=cache_dir)
+    assert ok1 is True
+    assert ok2 is True
+    assert int(counter.read_text(encoding="utf-8")) == 2
+    assert not (cache_dir / CACHE_FILENAME).exists()
