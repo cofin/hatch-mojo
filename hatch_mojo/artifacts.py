@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
+
+from hatchling.builders.macos import process_macos_plat_tag
+from packaging.tags import sys_tags
 
 from hatch_mojo.types import BuildJob
 
@@ -45,11 +49,31 @@ def resolve_install_target(job: BuildJob) -> str:
     raise ValueError(f"Unknown install kind '{job.install_kind}' for {job.name}")
 
 
-def register_artifacts(*, root: Path, build_data: dict[str, Any], jobs: list[BuildJob], target_name: str) -> None:
-    """Register built artifacts in Hatch build_data."""
+def resolve_host_platform_tag(*, macos_max_compat: bool = False) -> str:
+    """Resolve the Hatchling-compatible PEP 425 host platform tag."""
+    plat = next(
+        (tag.platform for tag in sys_tags() if "manylinux" not in tag.platform and "musllinux" not in tag.platform),
+        "any",
+    )
+    if sys.platform == "darwin":
+        return process_macos_plat_tag(plat, compat=macos_max_compat)
+    return plat
+
+
+def register_artifacts(
+    *,
+    root: Path,
+    build_data: dict[str, Any],
+    jobs: list[BuildJob],
+    target_name: str,
+    wheel_tag: str = "auto",
+    macos_max_compat: bool = False,
+) -> None:
+    """Register built artifacts and wheel tag policy in Hatch ``build_data``."""
     force_include = build_data.setdefault("force_include", {})
 
     has_native = False
+    has_extension = False
     for job in jobs:
         target = resolve_install_target(job)
         source = str(job.output_path)
@@ -62,7 +86,26 @@ def register_artifacts(*, root: Path, build_data: dict[str, Any], jobs: list[Bui
 
         if job.emit not in {"object", "mojoc"}:
             has_native = True
+        if job.emit == "python-extension":
+            has_extension = True
 
-    if target_name == "wheel" and has_native:
+    if target_name != "wheel":
+        return
+
+    if wheel_tag not in {"auto", "infer", "py3-none"}:
+        if has_native:
+            build_data["pure_python"] = False
+        build_data["infer_tag"] = False
+        build_data["tag"] = wheel_tag
+        return
+
+    if not has_native:
+        return
+
+    build_data["pure_python"] = False
+    effective_policy = ("infer" if has_extension else "py3-none") if wheel_tag == "auto" else wheel_tag
+    if effective_policy == "infer":
         build_data["infer_tag"] = True
-        build_data["pure_python"] = False
+    else:
+        build_data["infer_tag"] = False
+        build_data["tag"] = f"py3-none-{resolve_host_platform_tag(macos_max_compat=macos_max_compat)}"

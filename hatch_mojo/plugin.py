@@ -344,8 +344,16 @@ class MojoBuildHook(BuildHookInterface[Any]):
                 build_data.setdefault("shared_data", {}).update(bundled.shared_data)
             manifest_files.extend(bundled.staged_files)
 
-        register_artifacts(root=root, build_data=build_data, jobs=planned, target_name=self.target_name)
-        _apply_zero_python_bypass(getattr(self, "build_config", None), build_data)
+        build_cfg = getattr(self, "build_config", None)
+        register_artifacts(
+            root=root,
+            build_data=build_data,
+            jobs=planned,
+            target_name=self.target_name,
+            wheel_tag=config.wheel_tag,
+            macos_max_compat=bool(getattr(build_cfg, "macos_max_compat", False)),
+        )
+        _apply_zero_python_bypass(build_cfg, build_data)
         save_manifest(root, config.build_dir, manifest_files)
 
     def finalize(self, version: str, build_data: dict[str, Any], artifact_path: str) -> None:

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from packaging.tags import Tag
 
-from hatch_mojo.artifacts import register_artifacts, resolve_install_target
+from hatch_mojo.artifacts import register_artifacts, resolve_host_platform_tag, resolve_install_target
 from hatch_mojo.types import BuildJob
 
 
@@ -211,3 +213,101 @@ def test_register_unknown_install_kind_raises(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="Unknown install kind"):
         register_artifacts(root=tmp_path, build_data=build_data, jobs=[job], target_name="wheel")
+
+
+def test_register_artifacts_wheel_tag_auto_extension_vs_standalone(tmp_path: Path) -> None:
+    plat = resolve_host_platform_tag()
+
+    ext_job = BuildJob(
+        "ext",
+        tmp_path / "ext.mojo",
+        tmp_path / "_ext.so",
+        "python-extension",
+        "pkg._ext",
+        None,
+        None,
+        (),
+        (),
+        (),
+        {},
+        (),
+    )
+    bd_ext: dict[str, Any] = {}
+    register_artifacts(root=tmp_path, build_data=bd_ext, jobs=[ext_job], target_name="wheel", wheel_tag="auto")
+    assert bd_ext["pure_python"] is False
+    assert bd_ext["infer_tag"] is True
+    assert "tag" not in bd_ext
+
+    cli_job = BuildJob(
+        "cli", tmp_path / "cli.mojo", tmp_path / "my-cli", "executable", None, "scripts", "my-cli", (), (), (), {}, ()
+    )
+    bd_cli: dict[str, Any] = {}
+    register_artifacts(root=tmp_path, build_data=bd_cli, jobs=[cli_job], target_name="wheel", wheel_tag="auto")
+    assert bd_cli["pure_python"] is False
+    assert bd_cli["infer_tag"] is False
+    assert bd_cli["tag"] == f"py3-none-{plat}"
+
+    ir_job = BuildJob(
+        "ir", tmp_path / "ir.mojo", tmp_path / "mod.mojoc", "mojoc", None, "package", "pkg", (), (), (), {}, ()
+    )
+    bd_ir: dict[str, Any] = {}
+    register_artifacts(root=tmp_path, build_data=bd_ir, jobs=[ir_job], target_name="wheel", wheel_tag="auto")
+    assert "pure_python" not in bd_ir
+    assert "infer_tag" not in bd_ir
+    assert "tag" not in bd_ir
+
+
+def test_register_artifacts_wheel_tag_py3_none_and_custom_and_darwin_compat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plat = resolve_host_platform_tag()
+    ext_job = BuildJob(
+        "ext",
+        tmp_path / "ext.mojo",
+        tmp_path / "_ext.so",
+        "python-extension",
+        "pkg._ext",
+        None,
+        None,
+        (),
+        (),
+        (),
+        {},
+        (),
+    )
+    bd_py3: dict[str, Any] = {}
+    register_artifacts(root=tmp_path, build_data=bd_py3, jobs=[ext_job], target_name="wheel", wheel_tag="py3-none")
+    assert bd_py3["pure_python"] is False
+    assert bd_py3["infer_tag"] is False
+    assert bd_py3["tag"] == f"py3-none-{plat}"
+
+    ir_job = BuildJob(
+        "ir", tmp_path / "ir.mojo", tmp_path / "mod.mojoc", "mojoc", None, "package", "pkg", (), (), (), {}, ()
+    )
+    bd_custom: dict[str, Any] = {}
+    register_artifacts(
+        root=tmp_path,
+        build_data=bd_custom,
+        jobs=[ir_job],
+        target_name="wheel",
+        wheel_tag="cp312-abi3-manylinux_2_34_x86_64",
+    )
+    assert "pure_python" not in bd_custom
+    assert bd_custom["infer_tag"] is False
+    assert bd_custom["tag"] == "cp312-abi3-manylinux_2_34_x86_64"
+
+    captured_compat: list[tuple[str, bool]] = []
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        "hatch_mojo.artifacts.sys_tags",
+        lambda: iter([Tag("cp312", "cp312", "macosx_14_0_arm64")]),
+    )
+
+    def _fake_process_macos(tag_plat: str, /, *, compat: bool = False) -> str:
+        captured_compat.append((tag_plat, compat))
+        return "macosx_11_0_arm64"
+
+    monkeypatch.setattr("hatch_mojo.artifacts.process_macos_plat_tag", _fake_process_macos)
+    assert resolve_host_platform_tag(macos_max_compat=True) == "macosx_11_0_arm64"
+    assert captured_compat == [("macosx_14_0_arm64", True)]

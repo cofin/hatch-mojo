@@ -39,6 +39,7 @@ def _config(
     clean_after: bool = False,
     bundle_libs: bool = True,
     cache: bool = True,
+    wheel_tag: str = "auto",
 ) -> Any:
     return SimpleNamespace(
         jobs=(object(),),
@@ -51,6 +52,7 @@ def _config(
         mojo_bin=None,
         bundle_libs=bundle_libs,
         cache=cache,
+        wheel_tag=wheel_tag,
         excluded_jobs=(),
     )
 
@@ -600,3 +602,30 @@ def test_initialize_forwards_cache_settings_to_compile_job(
 
     MojoBuildHook.initialize(cast("Any", fake), "standard", {})
     assert recorded == [(False, tmp_path / "build/mojo")]
+
+
+def test_initialize_forwards_wheel_tag_and_macos_max_compat(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = SimpleNamespace(display_warning=lambda *_a: None, display_debug=lambda *_a: None)
+    build_config = SimpleNamespace(macos_max_compat=True, target_config={})
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app, build_config=build_config)
+    job = _job(tmp_path)
+    recorded_reg: list[tuple[str, bool]] = []
+
+    def _capture_register(**kwargs: Any) -> None:
+        recorded_reg.append((kwargs["wheel_tag"], kwargs["macos_max_compat"]))
+
+    monkeypatch.setattr(
+        "hatch_mojo.plugin.parse_config",
+        lambda *_a, **_kw: _config(bundle_libs=False, wheel_tag="py3-none"),
+    )
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_a, **_kw: [job])
+    monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_a, **_kw: "mojo")
+    monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kw: (True, "ok"))
+    monkeypatch.setattr("hatch_mojo.plugin.register_artifacts", _capture_register)
+    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_a, **_kw: tmp_path / "manifest.json")
+
+    MojoBuildHook.initialize(cast("Any", fake), "standard", {})
+    assert recorded_reg == [("py3-none", True)]

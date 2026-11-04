@@ -456,3 +456,35 @@ def test_parse_config_empty_vs_excluded_jobs() -> None:
     )
     assert filtered.jobs == ()
     assert filtered.excluded_jobs == ("only",)
+
+
+def test_parse_config_wheel_tag_variants_and_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HATCH_MOJO_WHEEL_TAG", raising=False)
+    job = {
+        "name": "core",
+        "input": "src/mo/core.mojo",
+        "emit": "python-extension",
+        "module": "pkg._core",
+    }
+
+    default_cfg = parse_config({"jobs": [job]}, target_name="wheel")
+    assert default_cfg.wheel_tag == "auto"
+
+    for valid in ("infer", "py3-none", "py3-none-manylinux_2_34_x86_64"):
+        cfg = parse_config({"wheel-tag": valid, "jobs": [job]}, target_name="wheel")
+        assert cfg.wheel_tag == valid
+
+    alias_cfg = parse_config({"wheel_tag": "py3-none", "jobs": [job]}, target_name="wheel")
+    assert alias_cfg.wheel_tag == "py3-none"
+
+    monkeypatch.setenv("HATCH_MOJO_WHEEL_TAG", "cp312-abi3-manylinux_2_34_x86_64")
+    env_cfg = parse_config({"wheel-tag": "infer", "jobs": [job]}, target_name="wheel")
+    assert env_cfg.wheel_tag == "cp312-abi3-manylinux_2_34_x86_64"
+    monkeypatch.delenv("HATCH_MOJO_WHEEL_TAG", raising=False)
+
+    with pytest.raises(TypeError, match="wheel-tag"):
+        parse_config({"wheel-tag": 123, "jobs": [job]}, target_name="wheel")
+
+    for bad_tag in ("", "bad", "py3-none-", "-none-any", "a-b-c-d"):
+        with pytest.raises(ValueError, match="wheel-tag"):
+            parse_config({"wheel-tag": bad_tag, "jobs": [job]}, target_name="wheel")

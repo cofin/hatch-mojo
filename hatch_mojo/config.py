@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from packaging.markers import Marker
+from packaging.tags import parse_tag
 from pathspec import GitIgnoreSpec
 
 from hatch_mojo.types import EMIT_VALUES, EmitType, InstallKind
@@ -51,6 +52,7 @@ class HookConfig:
     exclude: tuple[str, ...]
     targets: tuple[str, ...]
     jobs: tuple[JobConfig, ...]
+    wheel_tag: str = "auto"
     excluded_jobs: tuple[str, ...] = ()
 
 
@@ -85,6 +87,36 @@ def _env_bool(env_name: str, raw_val: Any, default: bool) -> bool:
             return False
         raise ValueError(f"Invalid boolean value {env_val!r} for {env_name}")
     return _bool(raw_val, default)
+
+
+_PEP425_TAG_PARTS = 3
+
+
+def _validate_wheel_tag(raw_val: Any) -> str:
+    """Validate ``wheel-tag`` config or ``HATCH_MOJO_WHEEL_TAG`` override."""
+    env_val = os.getenv("HATCH_MOJO_WHEEL_TAG")
+    candidate: Any = env_val if (env_val is not None and env_val.strip() != "") else raw_val
+    if candidate is None:
+        return "auto"
+    if not isinstance(candidate, str):
+        msg = f"Expected str for wheel-tag, got {type(candidate)!r}"
+        raise TypeError(msg)
+    val = candidate.strip()
+    if val in {"auto", "infer", "py3-none"}:
+        return val
+    parts = val.split("-")
+    if len(parts) != _PEP425_TAG_PARTS or not all(parts):
+        msg = f"Invalid wheel-tag {candidate!r}; expected 'auto', 'infer', 'py3-none', or '<py>-<abi>-<plat>'"
+        raise ValueError(msg)
+    try:
+        parsed = parse_tag(val)
+    except ValueError as exc:
+        msg = f"Invalid wheel-tag {candidate!r}: {exc}"
+        raise ValueError(msg) from exc
+    if not parsed:
+        msg = f"Invalid wheel-tag {candidate!r}"
+        raise ValueError(msg)
+    return val
 
 
 _JOB_KEY_ALIASES: dict[str, str] = {
@@ -214,6 +246,8 @@ def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
 
     skip_editable = _env_bool("HATCH_MOJO_SKIP_EDITABLE", raw.get("skip-editable"), False)
     cache = _env_bool("HATCH_MOJO_CACHE", raw.get("cache"), True)
+    raw_wheel_tag = raw["wheel-tag"] if "wheel-tag" in raw else raw.get("wheel_tag")
+    wheel_tag = _validate_wheel_tag(raw_wheel_tag)
 
     jobs: list[JobConfig] = []
     excluded_jobs: list[str] = []
@@ -254,6 +288,7 @@ def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
             exclude=exclude,
             targets=tuple(_as_list(raw.get("targets") or ["wheel"])),
             jobs=(),
+            wheel_tag=wheel_tag,
             excluded_jobs=(),
         )
 
@@ -275,5 +310,6 @@ def parse_config(raw: dict[str, Any] | None, *, target_name: str) -> HookConfig:
         exclude=exclude,
         targets=tuple(_as_list(raw.get("targets") or ["wheel"])),
         jobs=tuple(jobs),
+        wheel_tag=wheel_tag,
         excluded_jobs=tuple(excluded_jobs),
     )

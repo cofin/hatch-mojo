@@ -267,3 +267,99 @@ def test_editable_wheel_build_succeeds_by_default(tmp_path: Path) -> None:
         namelist = zf.namelist()
     assert f"my_pkg/_core{suffix}" not in namelist
     assert any(name.endswith(".pth") for name in namelist)
+
+
+def test_wheel_build_py3_none_extension_and_auto_executable(tmp_path: Path) -> None:
+    repo_root = Path(__file__).parent.parent.absolute()
+
+    ext_dir = tmp_path / "py3_ext_pkg"
+    ext_dir.mkdir()
+    fake_mojo_ext = ext_dir / "mojo"
+    _write_fake_mojo(fake_mojo_ext)
+    (ext_dir / "pyproject.toml").write_text(
+        textwrap.dedent(f"""
+            [project]
+            name = "py3-ext-pkg"
+            version = "1.0.0"
+
+            [build-system]
+            build-backend = "hatchling.build"
+            requires = ["hatchling", "hatch-mojo @ file://{repo_root.as_posix()}"]
+
+            [tool.hatch.build.targets.wheel.hooks.mojo]
+            mojo-bin = "{fake_mojo_ext.as_posix()}"
+            bundle-libs = false
+            wheel-tag = "py3-none"
+
+            [[tool.hatch.build.targets.wheel.hooks.mojo.jobs]]
+            name = "core"
+            input = "src/mo/core.mojo"
+            emit = "python-extension"
+            module = "py3_ext_pkg._core"
+        """),
+        encoding="utf-8",
+    )
+    (ext_dir / "src" / "mo").mkdir(parents=True)
+    (ext_dir / "src" / "mo" / "core.mojo").write_text("def main(): pass\n", encoding="utf-8")
+    (ext_dir / "src" / "py3_ext_pkg").mkdir(parents=True)
+    (ext_dir / "src" / "py3_ext_pkg" / "__init__.py").write_text("", encoding="utf-8")
+
+    res_ext = subprocess.run(
+        ["uv", "build", "--wheel", "--refresh-package", "hatch-mojo"],
+        cwd=ext_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_ext.returncode == 0, f"STDOUT: {res_ext.stdout}\nSTDERR: {res_ext.stderr}"
+    ext_wheels = list((ext_dir / "dist").glob("*.whl"))
+    assert len(ext_wheels) == 1
+    assert "-py3-none-" in ext_wheels[0].name
+    with zipfile.ZipFile(ext_wheels[0], "r") as zf:
+        wheel_meta = zf.read("py3_ext_pkg-1.0.0.dist-info/WHEEL").decode("utf-8")
+    assert "Root-Is-Purelib: false" in wheel_meta
+    assert "Tag: py3-none-" in wheel_meta
+
+    cli_dir = tmp_path / "auto_cli_pkg"
+    cli_dir.mkdir()
+    fake_mojo_cli = cli_dir / "mojo"
+    _write_fake_mojo(fake_mojo_cli)
+    (cli_dir / "pyproject.toml").write_text(
+        textwrap.dedent(f"""
+            [project]
+            name = "auto-cli-pkg"
+            version = "1.0.0"
+
+            [build-system]
+            build-backend = "hatchling.build"
+            requires = ["hatchling", "hatch-mojo @ file://{repo_root.as_posix()}"]
+
+            [tool.hatch.build.targets.wheel.hooks.mojo]
+            mojo-bin = "{fake_mojo_cli.as_posix()}"
+            bundle-libs = false
+
+            [[tool.hatch.build.targets.wheel.hooks.mojo.jobs]]
+            name = "cli"
+            input = "cli.mojo"
+            emit = "executable"
+            install = {{ kind = "scripts", path = "my-cli" }}
+        """),
+        encoding="utf-8",
+    )
+    (cli_dir / "cli.mojo").write_text("def main(): pass\n", encoding="utf-8")
+
+    res_cli = subprocess.run(
+        ["uv", "build", "--wheel", "--refresh-package", "hatch-mojo"],
+        cwd=cli_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_cli.returncode == 0, f"STDOUT: {res_cli.stdout}\nSTDERR: {res_cli.stderr}"
+    cli_wheels = list((cli_dir / "dist").glob("*.whl"))
+    assert len(cli_wheels) == 1
+    assert "-py3-none-" in cli_wheels[0].name
+    with zipfile.ZipFile(cli_wheels[0], "r") as zf:
+        cli_wheel_meta = zf.read("auto_cli_pkg-1.0.0.dist-info/WHEEL").decode("utf-8")
+    assert "Root-Is-Purelib: false" in cli_wheel_meta
+    assert "Tag: py3-none-" in cli_wheel_meta
