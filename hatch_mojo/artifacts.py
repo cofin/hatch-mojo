@@ -16,36 +16,49 @@ def _module_dest(module: str, output: Path) -> str:
     return f"{module_path}{output.suffix}"
 
 
+def resolve_install_target(job: BuildJob) -> str:
+    """Resolve the archive-relative installation path for *job*."""
+    if job.emit == "python-extension":
+        if not job.module:
+            raise ValueError(f"python-extension job '{job.name}' missing module")
+        return _module_dest(job.module, job.output_path)
+
+    if not job.install_kind:
+        raise ValueError(f"non-python job '{job.name}' missing install mapping")
+    if job.install_kind == "root":
+        return job.output_path.name
+    if not job.install_path:
+        raise ValueError(f"non-python job '{job.name}' missing install mapping")
+
+    if job.install_kind in {"force-include", "scripts"}:
+        return (
+            f"{job.install_path.strip('/')}/{job.output_path.name}"
+            if job.install_path.endswith("/")
+            else job.install_path.lstrip("/")
+        )
+    if job.install_kind == "package":
+        return f"{job.install_path.strip('/')}/{job.output_path.name}"
+    if job.install_kind == "data":
+        cleaned = job.install_path.lstrip("/")
+        is_dir = cleaned.endswith("/") or ("/" not in cleaned and "." not in Path(cleaned).name)
+        return f"{cleaned.rstrip('/')}/{job.output_path.name}" if is_dir else cleaned
+    raise ValueError(f"Unknown install kind '{job.install_kind}' for {job.name}")
+
+
 def register_artifacts(*, root: Path, build_data: dict[str, Any], jobs: list[BuildJob], target_name: str) -> None:
     """Register built artifacts in Hatch build_data."""
     force_include = build_data.setdefault("force_include", {})
-    artifacts = build_data.setdefault("artifacts", [])
 
     has_native = False
     for job in jobs:
+        target = resolve_install_target(job)
         source = str(job.output_path)
-        if job.emit == "python-extension":
-            if not job.module:
-                raise ValueError(f"python-extension job '{job.name}' missing module")
-            destination = _module_dest(job.module, job.output_path)
-            force_include[source] = destination
-            has_native = True
-            continue
-
-        if not job.install_kind or not job.install_path:
-            raise ValueError(f"non-python job '{job.name}' missing install mapping")
-
-        if job.install_kind == "force-include":
-            force_include[source] = job.install_path
-        elif job.install_kind == "package":
-            force_include[source] = f"{job.install_path.rstrip('/')}/{job.output_path.name}"
-        elif job.install_kind == "root":
-            force_include[source] = job.output_path.name
-        elif job.install_kind in {"data", "scripts"}:
-            artifacts.append(job.output_path.relative_to(root).as_posix())
-            force_include[source] = f"{job.install_path.rstrip('/')}/{job.output_path.name}"
+        if job.emit != "python-extension" and job.install_kind == "scripts":
+            build_data.setdefault("shared_scripts", {})[source] = target
+        elif job.emit != "python-extension" and job.install_kind == "data":
+            build_data.setdefault("shared_data", {})[source] = target
         else:
-            raise ValueError(f"Unknown install kind '{job.install_kind}' for {job.name}")
+            force_include[source] = target
 
         if job.emit not in {"object", "mojoc"}:
             has_native = True

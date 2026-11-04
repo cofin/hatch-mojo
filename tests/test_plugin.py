@@ -321,3 +321,51 @@ def test_finalize_noop_when_clean_after_build_disabled(
     monkeypatch.setattr("hatch_mojo.plugin.clean_from_manifest", lambda *_a, **_kw: calls.append("clean"))
     MojoBuildHook.finalize(cast("Any", fake), "standard", {}, "dist/pkg.whl")
     assert calls == []
+
+
+def test_initialize_sets_bypass_selection_for_standalone_shared_scripts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cfg = _config(bundle_libs=False)
+    job = BuildJob(
+        name="cli",
+        input_path=tmp_path / "cli.mojo",
+        output_path=tmp_path / "build/mojo/my-cli",
+        emit="executable",
+        module=None,
+        install_kind="scripts",
+        install_path="my-cli",
+        include_dirs=(),
+        defines=(),
+        flags=(),
+        env={},
+        depends_on=(),
+    )
+    app = SimpleNamespace(display_warning=lambda *_a: None, display_debug=lambda *_a: None)
+    target_config: dict[str, Any] = {}
+    build_config = SimpleNamespace(target_config=target_config)
+    fake = SimpleNamespace(root=str(tmp_path), config={}, target_name="wheel", app=app, build_config=build_config)
+
+    monkeypatch.setattr("hatch_mojo.plugin.parse_config", lambda *_a, **_kw: cfg)
+    monkeypatch.setattr("hatch_mojo.plugin.plan_jobs", lambda *_a, **_kw: [job])
+    monkeypatch.setattr("hatch_mojo.plugin.discover_mojo", lambda *_a, **_kw: "mojo")
+    monkeypatch.setattr("hatch_mojo.plugin.compile_job", lambda **_kw: (True, "ok"))
+    monkeypatch.setattr("hatch_mojo.plugin.save_manifest", lambda *_a, **_kw: tmp_path / "manifest.json")
+
+    build_data: dict[str, Any] = {}
+    MojoBuildHook.initialize(cast("Any", fake), "standard", build_data)
+    assert build_data.get("shared_scripts") == {str(job.output_path): "my-cli"}
+    assert not build_data.get("force_include")
+    assert target_config["bypass-selection"] is True
+
+    explicit_target_config: dict[str, Any] = {"bypass-selection": False}
+    fake_explicit = SimpleNamespace(
+        root=str(tmp_path),
+        config={},
+        target_name="wheel",
+        app=app,
+        build_config=SimpleNamespace(target_config=explicit_target_config),
+    )
+    MojoBuildHook.initialize(cast("Any", fake_explicit), "standard", {})
+    assert explicit_target_config["bypass-selection"] is False

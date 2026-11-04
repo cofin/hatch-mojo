@@ -119,6 +119,14 @@ class MojoBuildHook(BuildHookInterface[Any]):
             manifest_files.extend(Path(path_str) for path_str in bundled)
 
         register_artifacts(root=root, build_data=build_data, jobs=planned, target_name=self.target_name)
+        if (
+            build_data.get("shared_scripts")
+            or build_data.get("shared_data")
+            or build_data.get("force_include_editable")
+        ) and not build_data.get("force_include"):
+            target_cfg = getattr(getattr(self, "build_config", None), "target_config", None)
+            if isinstance(target_cfg, dict):
+                target_cfg.setdefault("bypass-selection", True)
         save_manifest(root, config.build_dir, manifest_files)
 
         if version == "editable":

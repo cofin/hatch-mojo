@@ -150,3 +150,64 @@ def test_wheel_build_with_clean_after_build_and_custom_build_dir(tmp_path: Path)
     suffix = ".pyd" if sys.platform == "win32" else ".so"
     assert f"my_pkg/_core{suffix}" in namelist
     assert not (project_dir / "build" / "custom_mojo").exists()
+
+
+def test_wheel_build_installs_executable_in_data_scripts(tmp_path: Path) -> None:
+    repo_root = Path(__file__).parent.parent.absolute()
+    project_dir = tmp_path / "cli_pkg"
+    project_dir.mkdir()
+
+    binary_payload = b"\x7fELF\x02\x01\x01\x00\xff\xfe-native-cli"
+    fake_mojo = project_dir / "mojo"
+    fake_mojo.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib\n"
+        "import sys\n"
+        "output = pathlib.Path(sys.argv[sys.argv.index('-o') + 1])\n"
+        "output.parent.mkdir(parents=True, exist_ok=True)\n"
+        f"output.write_bytes({binary_payload!r})\n",
+        encoding="utf-8",
+    )
+    fake_mojo.chmod(0o755)
+
+    pyproject = project_dir / "pyproject.toml"
+    pyproject.write_text(
+        textwrap.dedent(f"""
+            [project]
+            name = "my-pkg"
+            version = "1.0.0"
+
+            [build-system]
+            build-backend = "hatchling.build"
+            requires = ["hatchling", "hatch-mojo @ file://{repo_root.as_posix()}"]
+
+            [tool.hatch.build.targets.wheel.hooks.mojo]
+            targets = ["wheel"]
+            mojo-bin = "{fake_mojo.as_posix()}"
+            bundle-libs = false
+
+            [[tool.hatch.build.targets.wheel.hooks.mojo.jobs]]
+            name = "cli"
+            input = "cli.mojo"
+            emit = "executable"
+            install = {{ kind = "scripts", path = "my-cli" }}
+        """),
+        encoding="utf-8",
+    )
+    (project_dir / "cli.mojo").write_text("def main():\n    pass\n", encoding="utf-8")
+
+    res = subprocess.run(
+        ["uv", "build", "--wheel", "--refresh-package", "hatch-mojo"],
+        cwd=project_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, f"uv build failed!\nSTDOUT: {res.stdout}\nSTDERR: {res.stderr}"
+
+    wheels = list((project_dir / "dist").glob("*.whl"))
+    assert len(wheels) == 1
+    with zipfile.ZipFile(wheels[0], "r") as zf:
+        namelist = zf.namelist()
+        assert "my_pkg-1.0.0.data/scripts/my-cli" in namelist, f"Contents: {namelist}"
+        assert zf.read("my_pkg-1.0.0.data/scripts/my-cli") == binary_payload
